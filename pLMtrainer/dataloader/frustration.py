@@ -9,7 +9,7 @@ from pytorch_lightning import LightningDataModule
 class FrustrationDataModule(LightningDataModule):
     def __init__(self, 
                  parquet_path,
-                 max_seq_length=1000,
+                 max_seq_length=700,
                  batch_size=64, 
                  num_workers=1,
                  persistent_workers=True):
@@ -23,6 +23,7 @@ class FrustrationDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         df = pq.read_table(self.parquet_path).to_pandas()
+        #df = df.sample(n=10000, random_state=42).reset_index(drop=True)  # Shuffle the dataframe
         print(f"Loaded {len(df)} samples from {self.parquet_path}")
         #Masking
         train_mask = df["set"] == "train"
@@ -37,15 +38,11 @@ class FrustrationDataModule(LightningDataModule):
         for i, idx_list in enumerate(df["res_idx"]):
             res_idx_mask[i, idx_list] = True
             frst_vals[i, idx_list] = torch.Tensor(df["frst_idx"][i])
+
+        frst_vals = frst_vals[:, :self.max_seq_length]
+        res_idx_mask = res_idx_mask[:, :self.max_seq_length]
         print("Populated res_idx_mask and frst_vals tensors")
-        #print(f"Train/Val/Test split: {train_mask.sum()}/{val_mask.sum()}/{test_mask.sum()} samples")
-        # Convert to lists for better serialization - chatty 
-        #train_data = {
-        #    "full_seq": df[train_mask]["full_seq"].tolist(),
-        #    "res_idx": res_idx_mask[train_mask],
-        #    #"frst_idx": df[train_mask]["frst_idx"].tolist(),
-        #    #"frst_class": df[train_mask]["frst_class"].tolist()
-        #}
+
         self.train_dataset = FrustrationDataset(df[train_mask]["full_seq"].tolist(),
                                                 res_idx_mask[train_mask],
                                                 frst_vals[train_mask])
