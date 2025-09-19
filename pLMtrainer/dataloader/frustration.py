@@ -10,12 +10,14 @@ class FrustrationDataModule(LightningDataModule):
     def __init__(self, 
                  parquet_path,
                  max_seq_length=700,
+                 regression=True,
                  batch_size=64, 
                  num_workers=1,
                  persistent_workers=True):
         super().__init__()
         self.parquet_path = parquet_path
         self.max_seq_length = max_seq_length
+        self.regression = regression
 
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -23,7 +25,7 @@ class FrustrationDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         df = pq.read_table(self.parquet_path).to_pandas()
-        #df = df.sample(n=10000, random_state=42).reset_index(drop=True)  # Shuffle the dataframe
+        df = df.sample(n=1000, random_state=42).reset_index(drop=True)  # Shuffle the dataframe
         print(f"Loaded {len(df)} samples from {self.parquet_path}")
         #Masking
         train_mask = df["set"] == "train"
@@ -33,11 +35,17 @@ class FrustrationDataModule(LightningDataModule):
 
         max_len = df["full_seq"].str.len().max()
         res_idx_mask = torch.zeros((len(df), max_len), dtype=torch.bool)
-        frst_vals = torch.zeros((len(df), max_len), dtype=torch.float)
+        if self.regression:
+            frst_vals = torch.zeros((len(df), max_len), dtype=torch.float)
+        else:
+            frst_vals = torch.zeros((len(df), max_len), dtype=torch.long)
         print("Initialized res_idx_mask and frst_vals tensors")
         for i, idx_list in enumerate(df["res_idx"]):
             res_idx_mask[i, idx_list] = True
-            frst_vals[i, idx_list] = torch.Tensor(df["frst_idx"][i])
+            if self.regression:
+                frst_vals[i, idx_list] = torch.Tensor(df["frst_idx"][i])
+            else:
+                frst_vals[i, idx_list] = torch.LongTensor(df["frst_class"][i]) + 1 # frst classes range from 1-20 with 0 being no info.
 
         frst_vals = frst_vals[:, :self.max_seq_length]
         res_idx_mask = res_idx_mask[:, :self.max_seq_length]

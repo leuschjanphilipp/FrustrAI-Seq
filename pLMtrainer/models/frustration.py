@@ -6,7 +6,16 @@ import pytorch_lightning as pl
 from transformers import T5Tokenizer, T5EncoderModel
 
 class FrustrationFNN(pl.LightningModule):
-    def __init__(self, input_dim=1024, hidden_dim=32, output_dim=1, dropout=0.15, max_seq_length=700, pLM_model="Rostlab/ProstT5", pLM_precision="full", prefix_prostT5="<AA2fold>"):
+    def __init__(self, 
+                 input_dim=1024, 
+                 hidden_dim=32, 
+                 output_dim=1, 
+                 dropout=0.15,
+                 regression=True, 
+                 max_seq_length=700, 
+                 pLM_model="Rostlab/ProstT5", 
+                 pLM_precision="full", 
+                 prefix_prostT5="<AA2fold>"):
         super(FrustrationFNN, self).__init__()
 
         self.tokenizer = T5Tokenizer.from_pretrained(pLM_model, do_lower_case=False, max_length=max_seq_length)
@@ -19,6 +28,12 @@ class FrustrationFNN(pl.LightningModule):
         self.encoder.eval()  # Freeze the encoder
 
         self.max_seq_length = max_seq_length + 1 # for aa token old: 2753 + 2 #for aa2fold + eos token. later trunc longest first strat and use arg for that
+        self.regression = regression
+
+        if regression:
+            self.loss_fn = nn.MSELoss()
+        else:
+            self.loss_fn = nn.CrossEntropyLoss(ignore_index=0) #TODO check for ignore index
 
         self.FNN = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -28,7 +43,7 @@ class FrustrationFNN(pl.LightningModule):
         )
     
     def forward(self, full_seq):
-        start_time = time.time()
+        #start_time = time.time()
         full_seq = [self.prefix_prostT5 + " " + " ".join(seq) for seq in full_seq]  # Add spaces between amino acids and prefix
         ids = self.tokenizer.batch_encode_plus(full_seq, 
                                                add_special_tokens=True, 
@@ -48,36 +63,37 @@ class FrustrationFNN(pl.LightningModule):
         embeddings = embeddings.float()
         res = self.FNN(embeddings)
         end_time = time.time()
-        print(f"Forward pass time: {end_time - start_time} seconds")
+        #print(f"Forward pass time: {end_time - start_time} seconds")
         return res
 
     def training_step(self, batch, batch_idx):
-        print("Training step")
+        #print("Training step")
         full_seq, res_mask, frst_vals = batch
         preds = self.forward(full_seq)
         preds = preds.squeeze(-1)
-        loss_fn = nn.MSELoss()
-        loss = loss_fn(preds[res_mask], frst_vals[res_mask])
-        self.log('train_loss', loss)
+        loss = self.loss_fn(preds[res_mask], frst_vals[res_mask])
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
-        print("Validation step")
+        #print("Validation step")
         full_seq, res_mask, frst_vals = batch
+        if res_mask.sum() == 0:
+            print("Validation batch with no valid residues - skipping") #TODO REMOVE ON CLUSTER ONLY DEBUGGING
+            return None  # Skip this batch
         preds = self.forward(full_seq)
         preds = preds.squeeze(-1)
-        loss_fn = nn.MSELoss()
-        loss = loss_fn(preds[res_mask], frst_vals[res_mask])
-        self.log('val_loss', loss)
+        loss = self.loss_fn(preds[res_mask], frst_vals[res_mask])
+        print(f"Validation loss: {loss.item()}")
+        self.log('val_loss', loss, prog_bar=True, on_step=False, on_epoch=True)
         return loss
 
     def test_step(self, batch, batch_idx):
         full_seq, res_mask, frst_vals = batch
         preds = self.forward(full_seq)
         preds = preds.squeeze(-1)
-        loss_fn = nn.MSELoss()
-        loss = loss_fn(preds[res_mask], frst_vals[res_mask])
-        self.log('test_loss', loss)
+        loss = self.loss_fn(preds[res_mask], frst_vals[res_mask])
+        self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
