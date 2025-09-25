@@ -1,3 +1,8 @@
 data/*
 notebooks/lightning_logs/*
 notebooks/checkpoints/*
+*.h5*
+*.ckpt
+*.npz
+*.parquet.gzip
+*.parquet

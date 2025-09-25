@@ -1,3 +1,3 @@
-from .frustration import FrustrationFNN
+from .frustration import FrustrationFNN, FrustrationCNN
 
-__all__ = ["FrustrationFNN"]
+__all__ = ["FrustrationFNN", "FrustrationCNN"]
