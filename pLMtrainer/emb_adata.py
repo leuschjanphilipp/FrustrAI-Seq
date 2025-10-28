@@ -14,9 +14,10 @@ df = pq.read_table(parquet_path).to_pandas()
 df = df.sample(n=10000, random_state=42).reset_index(drop=True)
 
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-pLM_model = "../data/prostT5"
+pLM_model = "../data/protT5"
 prefix_prostT5 = "<AA2fold>"
-max_seq_length = 700 + 1
+max_seq_length = 512
+
 tokenizer = T5Tokenizer.from_pretrained(pLM_model, do_lower_case=False, max_length=max_seq_length)
 encoder = T5EncoderModel.from_pretrained(pLM_model).to(device)
 
@@ -36,17 +37,17 @@ for row in tqdm.tqdm(df.iterrows()):
     idx = min(len(row[1]["full_seq"]), max_seq_length)
 
     full_seq = [prefix_prostT5 + " " + " ".join(seq) for seq in [row[1]["full_seq"]]]  # Add spaces between amino acids and prefix
-    ids = tokenizer.batch_encode_plus(full_seq, 
-                                    add_special_tokens=True, 
+    ids = tokenizer.batch_encode_plus(full_seq,
+                                    add_special_tokens=True,
                                     max_length=max_seq_length,
                                     padding="max_length",
                                     truncation="longest_first",
                                     return_tensors='pt'
                                     ).to(device)
-        
+
     with torch.no_grad():
         embedding_rpr = encoder(
-            ids.input_ids, 
+            ids.input_ids,
             attention_mask=ids.attention_mask
         )
     emb = embedding_rpr.last_hidden_state[0, 1:idx,]
@@ -73,4 +74,4 @@ adata.obs['frst_class'] = adata.obs['frst_class'].astype('category')
 
 sc.pp.neighbors(adata)
 sc.tl.umap(adata)
-sc.write(f"frustration_adata_{max_seq_length-1}.h5ad", adata)
+sc.write(f"frustration_adata_{max_seq_length}.h5ad", adata)

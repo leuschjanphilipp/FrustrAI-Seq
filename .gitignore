@@ -1,6 +1,7 @@
 data/*
 notebooks/lightning_logs/*
 notebooks/checkpoints/*
+notebooks/*/
 *.h5*
 *.ckpt
 *.npz

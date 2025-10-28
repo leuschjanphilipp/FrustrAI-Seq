@@ -16,10 +16,10 @@ sys.path.append('..')
 sys.path.append('pLMtrainer')
 from pLMtrainer.dataloader import FrustrationDataModule
 
-class FrustrationCNN(pl.LightningModule):
+class FrustrationCNN_REG(pl.LightningModule):
     def __init__(self, 
                  config):
-        super(FrustrationCNN, self).__init__()
+        super(FrustrationCNN_REG, self).__init__()
 
         self.config = config
         self.experiment_name = config["experiment_name"]
@@ -69,12 +69,6 @@ class FrustrationCNN(pl.LightningModule):
             nn.Conv2d(config["hidden_dims"][0], config["hidden_dims"][1], kernel_size=(7, 1), padding=(3, 0))
         )
 
-        self.cls_head = nn.Sequential(
-            nn.ReLU(),
-            nn.Dropout(config["dropout"]),
-            nn.Linear(config["hidden_dims"][1], config["output_dim"]-1),
-        ) 
-
         self.reg_head = nn.Sequential(
             nn.ReLU(),
             nn.Dropout(config["dropout"]),
@@ -82,10 +76,6 @@ class FrustrationCNN(pl.LightningModule):
         )
 
         self.mse_loss_fn = nn.MSELoss()
-        if config["ce_weighting"] is not None:
-            self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"], weight=config["ce_weighting"]) 
-        else:
-            self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"]) 
 
     def forward(self, full_seq):
         #start_time = time.time()
@@ -122,30 +112,24 @@ class FrustrationCNN(pl.LightningModule):
         embeddings = embeddings.permute(0, 2, 1).unsqueeze(-1)  # (batch_size, input_dim, seq_length, 1)
 
         res = self.CNN(embeddings).squeeze(-1).permute(0, 2, 1)  # (batch_size, seq_length, output_dim)
-        cls_res = self.cls_head(res)
         reg_res = self.reg_head(res)
         #end_time = time.time()
         #print(f"Forward pass time: {end_time - start_time} seconds")
-        return cls_res, reg_res
+        return reg_res
     
     def general_step(self, batch, stage):
         full_seq, res_mask, frst_vals, frst_classes = batch
         if res_mask.sum() == 0:
             print(f"{stage.capitalize()} batch with no valid residues - skipping") 
             return None  # Skip this batch
-        
-        cls_preds, reg_preds = self.forward(full_seq)
-        cls_preds = cls_preds.squeeze(-1)
+
+        reg_preds = self.forward(full_seq)
         reg_preds = reg_preds.squeeze(-1)
 
         mse_loss = self.mse_loss_fn(reg_preds[res_mask], frst_vals[res_mask]) # shape (batch_size, 1)
-        ce_loss = self.ce_loss_fn(cls_preds.flatten(0, 1), frst_classes.flatten()) # shape (batch_size, n_classes(3))
-        loss = mse_loss + ce_loss
 
-        self.log(f'{stage}_mse_loss', mse_loss, on_step=(stage=='train'), on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log(f'{stage}_ce_loss', ce_loss, on_step=(stage=='train'), on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log(f'{stage}_loss', loss, on_step=(stage=='train'), on_epoch=True, prog_bar=True, sync_dist=True)
-        return loss
+        self.log(f'{stage}_mse_loss', mse_loss, on_step=(stage=='train'), on_epoch=True, prog_bar=True, sync_dist=True)
+        return mse_loss
 
     def training_step(self, batch, batch_idx):
         return self.general_step(batch, 'train')
@@ -158,34 +142,25 @@ class FrustrationCNN(pl.LightningModule):
         if res_mask.sum() == 0:
             print("Test batch with no valid residues - skipping") 
             return None  # Skip this batch
-        
-        cls_preds, reg_preds = self.forward(full_seq)
-        cls_preds = cls_preds.squeeze(-1)
+
+        reg_preds = self.forward(full_seq)
         reg_preds = reg_preds.squeeze(-1)
 
         mse_loss = self.mse_loss_fn(reg_preds[res_mask], frst_vals[res_mask]) # shape (batch_size, 1)
-        ce_loss = self.ce_loss_fn(cls_preds.flatten(0,1), frst_classes.flatten()) # shape (batch_size, 20)
-        loss = mse_loss + ce_loss
 
-        self.log('test_mse_loss', mse_loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log('test_ce_loss', ce_loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log('test_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('test_mse_loss', mse_loss, on_step=False, on_epoch=True, prog_bar=True)
 
         self.test_dict["full_seqs"].append(np.array(full_seq))
         self.test_dict["masks"].append(res_mask.cpu().numpy())
 
         self.test_dict["regr_preds"].append(reg_preds.cpu().numpy())
-        self.test_dict["cls_preds"].append(cls_preds.cpu().numpy())
         self.test_dict["regr_targets"].append(frst_vals.cpu().numpy())
-        self.test_dict["cls_targets"].append(frst_classes.cpu().numpy())
 
         self.test_dict["masked_regr_preds"].append(reg_preds[res_mask].flatten().cpu().numpy())
-        self.test_dict["masked_cls_preds"].append(torch.argmax(cls_preds, dim=-1)[res_mask].flatten().cpu().numpy())
         self.test_dict["masked_regr_targets"].append(frst_vals[res_mask].flatten().cpu().numpy())
-        self.test_dict["masked_cls_targets"].append(frst_classes[res_mask].flatten().cpu().numpy())
 
-        return loss
-    
+        return mse_loss
+
     def predict_step(self, batch, batch_idx):
         full_seq, _, _, _ = batch
         preds = self.forward(full_seq)
@@ -195,13 +170,11 @@ class FrustrationCNN(pl.LightningModule):
         if self.finetune:
             params = list(self.CNN.parameters()) + \
                      list(self.encoder.parameters()) + \
-                     list(self.reg_head.parameters()) + \
-                     list(self.cls_head.parameters())
+                     list(self.reg_head.parameters())
             optimizer = torch.optim.Adam(params, lr=1e-3)
         else:
             params = list(self.CNN.parameters()) + \
-                     list(self.reg_head.parameters()) + \
-                     list(self.cls_head.parameters())
+                     list(self.reg_head.parameters())
             optimizer = torch.optim.Adam(params, lr=1e-3)
         return optimizer
 
@@ -232,27 +205,19 @@ class FrustrationCNN(pl.LightningModule):
     def on_test_epoch_start(self):
         self.test_dict = {"full_seqs": [],
                           "masks": [],
-                          "regr_preds": [], 
-                          "cls_preds": [], 
+                          "regr_preds": [],
                           "regr_targets": [], 
-                          "cls_targets": [],
-                          "masked_regr_preds": [], 
-                          "masked_cls_preds": [], 
-                          "masked_regr_targets": [], 
-                          "masked_cls_targets": []}
+                          "masked_regr_preds": [],  
+                          "masked_regr_targets": [], }
 
     def on_test_epoch_end(self):
         #concat the batches
         self.test_dict["full_seqs"] = np.concatenate(self.test_dict["full_seqs"])
         self.test_dict["masks"] = np.concatenate(self.test_dict["masks"])
         self.test_dict["regr_preds"] = np.concatenate(self.test_dict["regr_preds"])
-        self.test_dict["cls_preds"] = np.concatenate(self.test_dict["cls_preds"])
         self.test_dict["regr_targets"] = np.concatenate(self.test_dict["regr_targets"])
-        self.test_dict["cls_targets"] = np.concatenate(self.test_dict["cls_targets"])
         self.test_dict["masked_regr_preds"] = np.concatenate(self.test_dict["masked_regr_preds"])
-        self.test_dict["masked_cls_preds"] = np.concatenate(self.test_dict["masked_cls_preds"])
         self.test_dict["masked_regr_targets"] = np.concatenate(self.test_dict["masked_regr_targets"])
-        self.test_dict["masked_cls_targets"] = np.concatenate(self.test_dict["masked_cls_targets"])
 
     def on_predict_start(self):
         self.preds_list = []
@@ -271,47 +236,4 @@ class FrustrationCNN(pl.LightningModule):
 
 
 if __name__ == "__main__":
-    
-    parquet_path = "pLMtrainer/data/frustration/v4_frustration.parquet.gzip"
-    data_module = FrustrationDataModule(df=None,
-                                        parquet_path=parquet_path, 
-                                        batch_size=10, 
-                                        max_seq_length=100, 
-                                        num_workers=1, 
-                                        persistent_workers=True, 
-                                        sample_size=1000,)
-    early_stop = EarlyStopping(monitor="val_loss",
-                           patience=5,
-                           mode='min',
-                           verbose=True)
-    checkpoint = ModelCheckpoint(monitor="val_loss",
-                                dirpath="./checkpoints",
-                                filename=f"debug",
-                                save_top_k=1,
-                                mode='min',
-                                save_weights_only=True)
-    logger = CSVLogger("./checkpoints", name="debug_logs")
-
-    model = FrustrationCNN(input_dim=1024, 
-                       hidden_dims=[64,10], 
-                       output_dim=4, 
-                       dropout=0.15, 
-                       max_seq_length=100,
-                       precision="half",
-                       pLM_model="pLMtrainer/data/ProtT5",  
-                       prefix_prostT5="<AA2fold>",
-                       no_label_token=-100)
-
-    trainer = Trainer(accelerator='auto', # gpu
-                  devices=-1,
-                  max_epochs=5,
-                  logger=logger,
-                  log_every_n_steps=10, # 50 for haicore default
-                  callbacks=[early_stop, checkpoint],
-                  precision="16-mixed",
-                  gradient_clip_val=1,
-                  enable_progress_bar=True,
-                  deterministic=False,
-                  )
-
-    trainer.fit(model, datamodule=data_module)
+    pass
