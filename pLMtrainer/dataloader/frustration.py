@@ -11,9 +11,12 @@ class FrustrationDataModule(LightningDataModule):
                  df, 
                  parquet_path=None,
                  max_seq_length=512,
-                 batch_size=16, 
+                 batch_size=16,
+                 set_key="set", 
                  num_workers=1,
                  persistent_workers=True,
+                 pin_memory=True,
+                 prefetch_factor=2,
                  sample_size=None,
                  cath_sampling_n=None):
         super().__init__()
@@ -21,8 +24,11 @@ class FrustrationDataModule(LightningDataModule):
         self.parquet_path = parquet_path
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
+        self.set_key = set_key
         self.num_workers = num_workers
         self.persistent_workers = persistent_workers
+        self.pin_memory = pin_memory
+        self.prefetch_factor = prefetch_factor
         self.sample_size = sample_size
         self.cath_sampling_n = cath_sampling_n
 
@@ -37,9 +43,9 @@ class FrustrationDataModule(LightningDataModule):
                 self.df = self.df.sample(n=self.sample_size, random_state=42).reset_index(drop=True)  # Shuffle the dataframe
             print(f"Loaded {len(self.df)} samples from {self.parquet_path}")
             #Masking
-            train_mask = self.df["set"] == "train"
-            val_mask = self.df["set"] == "val"
-            test_mask = self.df["set"] == "test"
+            train_mask = self.df[self.set_key] == "train"
+            val_mask = self.df[self.set_key] == "val"
+            test_mask = self.df[self.set_key] == "test"
             print("Created train/val/test masks")
 
             max_len = self.df["full_seq"].str.len().max()
@@ -104,28 +110,36 @@ class FrustrationDataModule(LightningDataModule):
                           batch_size=self.batch_size, 
                           shuffle=True, 
                           num_workers=self.num_workers,
-                          persistent_workers=self.persistent_workers)
+                          persistent_workers=self.persistent_workers,
+                          pin_memory=self.pin_memory,)
+                          #prefetch_factor=self.prefetch_factor)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, 
                           batch_size=self.batch_size,
                           shuffle=False, 
                           num_workers=self.num_workers,
-                          persistent_workers=self.persistent_workers)
+                          persistent_workers=self.persistent_workers,
+                          pin_memory=self.pin_memory,)
+                          #prefetch_factor=self.prefetch_factor)
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset, 
                           batch_size=self.batch_size,
                           shuffle=False, 
                           num_workers=self.num_workers,
-                          persistent_workers=self.persistent_workers)
-    
+                          persistent_workers=self.persistent_workers,
+                          pin_memory=self.pin_memory,)
+                          #prefetch_factor=self.prefetch_factor)
+
     def predict_dataloader(self):
         return DataLoader(self.predict_dataset, 
                           batch_size=self.batch_size,
                           shuffle=False, 
                           num_workers=self.num_workers,
-                          persistent_workers=self.persistent_workers)
+                          persistent_workers=self.persistent_workers,
+                          pin_memory=self.pin_memory,)
+                          #prefetch_factor=self.prefetch_factor)
 
 class FrustrationDataset(Dataset):
     def __init__(self, full_seq, res_idx, frst_vals, frst_classes):

@@ -1,4 +1,4 @@
 from .frustration import FrustrationCNN
-from .frustration_reg import FrustrationCNN_REG
+from .frustraSeq import FrustraSeq
 
-__all__ = ["FrustrationCNN", "FrustrationCNN_REG"]
+__all__ = ["FrustrationCNN", "FrustraSeq"]
