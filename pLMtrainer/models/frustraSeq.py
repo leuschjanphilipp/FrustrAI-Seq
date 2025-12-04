@@ -1,3 +1,4 @@
+import os
 import sys
 import yaml
 import time
@@ -6,8 +7,9 @@ import numpy as np
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from torch.optim.lr_scheduler import ReduceLROnPlateau, LinearLR
-from transformers import T5Tokenizer, T5EncoderModel
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
+from torch.optim.lr_scheduler import LinearLR
+from transformers import T5Tokenizer, T5EncoderModel, EsmModel, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 
 sys.path.append('..')
@@ -22,11 +24,17 @@ class FrustraSeq(pl.LightningModule):
         self.plm_model = config["pLM_model"]
         self.prefix_prostT5 = config["prefix_prostT5"]
         self.max_seq_length = config["max_seq_length"]
-        if "prostt5" in self.plm_model.lower():
-            self.max_seq_length += 1  # for prostT5, add 1 for bos token <AA2fold> #TODO use 511 aas to stay at 512 (div by 8)
-        self.tokenizer = T5Tokenizer.from_pretrained(self.plm_model, do_lower_case=False, max_length=self.max_seq_length)
-        self.encoder = T5EncoderModel.from_pretrained(self.plm_model).to(self.device)
+        
+        if "esm" in self.plm_model.lower():
+            self.tokenizer = AutoTokenizer.from_pretrained(self.plm_model, max_length=self.max_seq_length)
+            self.encoder = EsmModel.from_pretrained(self.plm_model).to(self.device)
 
+        elif "t5" in self.plm_model.lower():
+            if "prostt5" in self.plm_model.lower():
+                self.max_seq_length += 1  # for prostT5, add 1 for bos token <AA2fold> #TODO use 511 aas to stay at 512 (div by 8)
+            self.tokenizer = T5Tokenizer.from_pretrained(self.plm_model, do_lower_case=False, max_length=self.max_seq_length)
+            self.encoder = T5EncoderModel.from_pretrained(self.plm_model).to(self.device)
+        
         print(f"Using LoRA fine-tuning for {self.config['lora_modules']} layers")
         peft_config = LoraConfig(
             task_type="FEATURE_EXTRACTION",
@@ -73,7 +81,9 @@ class FrustraSeq(pl.LightningModule):
             self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"], 
                                                   weight=torch.Tensor(config["ce_weighting"])) 
         else:
-            self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"]) 
+            self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"])
+
+        print(f"RANK {os.environ.get('RANK', -1)}: Model initialized.")
 
     def forward(self, full_seq):
         emb = self._plm_forward(full_seq)  # (batch_size, seq_length, input_dim)
@@ -112,7 +122,7 @@ class FrustraSeq(pl.LightningModule):
         #start_time = time.time()
         res = self.CNN(embeddings).squeeze(-1).permute(0, 2, 1)  # (batch_size, seq_length, output_dim)
         #end_time = time.time()
-        #print(f"Forward pass time: {end_time - start_time} seconds")
+        #print(f"CNN forward pass time: {end_time - start_time} seconds")
         return {"regression": self.reg_head(res), "classification": self.cls_head(res)}
 
     def general_step(self, batch, stage):
@@ -179,43 +189,42 @@ class FrustraSeq(pl.LightningModule):
         full_seq, _, _, _ = batch
         preds = self.forward(full_seq)
         self.preds_list.append(preds.cpu().numpy())
-
+    
     def configure_optimizers(self):
-        print('Configuring optimizers and schedulers...')
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.config["architecture"]["lr"])
-        warmup_scheduler = LinearLR(optimizer, start_factor=0.3, end_factor=1, total_iters=100)
-        plateau_scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=5, min_lr=1e-6)
+
+        lora_params = [p for n,p in self.encoder.named_parameters() if p.requires_grad and "lora" in n]
+        head_params = [p for n,p in self.named_parameters() if p.requires_grad and "cls_head" in n or "reg_head" in n]
+
+        optimizer_grouped_parameters = [
+            {"params": lora_params,
+            "lr": self.config["architecture"]["lr"] / 3, "weight_decay": 0.0},
+            {"params": head_params,
+            "lr": self.config["architecture"]["lr"], "weight_decay": 0.01},
+            ]
+
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, betas=(0.9, 0.999), eps=1e-8)
+
+        warmup_steps = 500
+        total_steps = self.trainer.estimated_stepping_batches
+
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.3, end_factor=1, total_iters=warmup_steps)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(total_steps - warmup_steps), eta_min=0.0)
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+
         return {
-        "optimizer": optimizer,
-        "lr_schedulers": [
-            {
-                "scheduler": warmup_scheduler,
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
-                "monitor": None,
-            },
-            {
-                "scheduler": plateau_scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-                "monitor": "val_loss",
-                "reduce_on_plateau": True,  
-            },
-            ],
+                "name": "cosine"
+            }
         }
-    """
-    "lr_scheduler": {
-            "scheduler": warmup_scheduler,
-            "interval": "step",
-            "frequency": 1,
-            "monitor": None,
-        }
-        }
-    """
 
     def on_train_start(self):
-        with open(f"./{self.experiment_name}/config.yaml", "w") as f:
-            yaml.dump(self.config, f, default_flow_style=False)
+        if self.trainer.global_rank == 0:
+            with open(f"./{self.experiment_name}/config.yaml", "w") as f:
+                yaml.dump(self.config, f, default_flow_style=False)
     
     def on_train_end(self):
         pass
@@ -243,7 +252,9 @@ class FrustraSeq(pl.LightningModule):
                           "masked_regr_preds": [],
                           "masked_cls_preds": [], 
                           "masked_regr_targets": [], 
-                          "masked_cls_targets": [],}
+                          "masked_cls_targets": [],
+                          "cls_preds_logits": [],
+                          "masked_cls_preds_logits": []}
 
     def on_test_epoch_end(self):
         #concat the batches
@@ -259,13 +270,20 @@ class FrustraSeq(pl.LightningModule):
     def on_predict_end(self):
         self.preds_dict = {key: np.concatenate(value) for key, value in self.pred_dict.items() if len(value) > 0}
 
+    @rank_zero_only
     def save_preds_dict(self, set="test"):
-        np.savez_compressed(f"./{self.experiment_name}/{self.experiment_name}_{set}_preds.npz", **self.test_dict)
+        print(f"TRAINER RANK {self.trainer.global_rank}. Save preds.")
+        print(f"OS RANK {os.environ.get('RANK', -1)}. Save preds.")
+
+        if self.trainer.global_rank == 0:
+            np.savez_compressed(f"./{self.experiment_name}/{set}_preds.npz", **self.test_dict)
 
     @staticmethod
+    #@rank_zero_only
     def suggest_params(trial):
+        print(f"OS RANK {os.environ.get('RANK', -1)}. Suggesting params.")
         architecture = {}
-        architecture["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        architecture["lr"] = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
         # Architecture
         architecture["dropout"] = trial.suggest_categorical("dropout", [0.0, 0.1, 0.2, 0.3])
         architecture["kernel_1"] = trial.suggest_categorical("kernel_1", [3,5,7,9])

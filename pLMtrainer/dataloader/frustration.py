@@ -111,8 +111,8 @@ class FrustrationDataModule(LightningDataModule):
                           shuffle=True, 
                           num_workers=self.num_workers,
                           persistent_workers=self.persistent_workers,
-                          pin_memory=self.pin_memory,)
-                          #prefetch_factor=self.prefetch_factor)
+                          pin_memory=self.pin_memory,
+                          prefetch_factor=self.prefetch_factor)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, 
@@ -120,8 +120,8 @@ class FrustrationDataModule(LightningDataModule):
                           shuffle=False, 
                           num_workers=self.num_workers,
                           persistent_workers=self.persistent_workers,
-                          pin_memory=self.pin_memory,)
-                          #prefetch_factor=self.prefetch_factor)
+                          pin_memory=self.pin_memory,
+                          prefetch_factor=self.prefetch_factor)
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset, 
@@ -129,8 +129,8 @@ class FrustrationDataModule(LightningDataModule):
                           shuffle=False, 
                           num_workers=self.num_workers,
                           persistent_workers=self.persistent_workers,
-                          pin_memory=self.pin_memory,)
-                          #prefetch_factor=self.prefetch_factor)
+                          pin_memory=self.pin_memory,
+                          prefetch_factor=self.prefetch_factor)
 
     def predict_dataloader(self):
         return DataLoader(self.predict_dataset, 
@@ -138,8 +138,8 @@ class FrustrationDataModule(LightningDataModule):
                           shuffle=False, 
                           num_workers=self.num_workers,
                           persistent_workers=self.persistent_workers,
-                          pin_memory=self.pin_memory,)
-                          #prefetch_factor=self.prefetch_factor)
+                          pin_memory=self.pin_memory,
+                          prefetch_factor=self.prefetch_factor)
 
 class FrustrationDataset(Dataset):
     def __init__(self, full_seq, res_idx, frst_vals, frst_classes):
