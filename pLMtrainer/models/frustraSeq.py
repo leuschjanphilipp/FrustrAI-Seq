@@ -1,3 +1,4 @@
+
 import os
 import sys
 import yaml
@@ -6,6 +7,8 @@ import torch
 import numpy as np
 import torch.nn as nn
 import pytorch_lightning as pl
+from scipy.stats import entropy
+from scipy.special import softmax
 
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from torch.optim.lr_scheduler import LinearLR
@@ -35,22 +38,26 @@ class FrustraSeq(pl.LightningModule):
             self.tokenizer = T5Tokenizer.from_pretrained(self.plm_model, do_lower_case=False, max_length=self.max_seq_length)
             self.encoder = T5EncoderModel.from_pretrained(self.plm_model).to(self.device)
         
-        print(f"Using LoRA fine-tuning for {self.config['lora_modules']} layers")
-        peft_config = LoraConfig(
-            task_type="FEATURE_EXTRACTION",
-            inference_mode=False,
-            r=self.config['lora_r'],
-            lora_alpha=self.config['lora_alpha'],
-            bias="all",
-            target_modules=self.config['lora_modules'],
-            #lora_dropout=0.1,
-        )
-        self.encoder.train()
-        self.encoder = get_peft_model(self.encoder, peft_config)
-        self.encoder.print_trainable_parameters()
-        # https://github.com/RSchmirler/ProtT5-EvoTuning/blob/main/notebook/PT5_EvoTuning.ipynb 
-        #peft_config = LoraConfig(r=4, lora_alpha=1, bias="all", target_modules=["q","k","v","o"], task_type = "SEQ_2_SEQ_LM",)
-        # https://github.com/mheinzinger/ProstT5/blob/main/scripts/predict_3Di_encoderOnly.py
+        if self.config["finetune"]:
+            print(f"Using LoRA fine-tuning for {self.config['lora_modules']} layers")
+            peft_config = LoraConfig(
+                task_type="FEATURE_EXTRACTION",
+                inference_mode=False,
+                r=self.config['lora_r'],
+                lora_alpha=self.config['lora_alpha'],
+                bias="all",
+                target_modules=self.config['lora_modules'],
+                #lora_dropout=0.1,
+            )
+            self.encoder.train()
+            self.encoder = get_peft_model(self.encoder, peft_config)
+            self.encoder.print_trainable_parameters()
+            # https://github.com/RSchmirler/ProtT5-EvoTuning/blob/main/notebook/PT5_EvoTuning.ipynb 
+            # peft_config = LoraConfig(r=4, lora_alpha=1, bias="all", target_modules=["q","k","v","o"], task_type = "SEQ_2_SEQ_LM",)
+            # https://github.com/mheinzinger/ProstT5/blob/main/scripts/predict_3Di_encoderOnly.py
+            #! future look into self.encoder.gradient_checkpointing_enable() - but appartently not working easily with DDP
+        else:
+            self.encoder.eval()
 
         self.CNN = nn.Sequential(
             nn.Conv2d(config["pLM_dim"], 
@@ -64,7 +71,7 @@ class FrustraSeq(pl.LightningModule):
                       kernel_size=config["architecture"]["kernel_2"], 
                       padding=config["architecture"]["padding_2"])
         )
-        #TODO separate reg head dim and cls head dim maybe? 
+        #TODO separate reg head dim and cls head dim maybe?
         self.reg_head = nn.Sequential(
         nn.ReLU(),
         nn.Dropout(config["architecture"]["dropout"]),
@@ -75,7 +82,6 @@ class FrustraSeq(pl.LightningModule):
             nn.Dropout(config["architecture"]["dropout"]),
             nn.Linear(config["architecture"]["hidden_dim_1"], 3),  # 3 classes
         )
-
         self.mse_loss_fn = nn.MSELoss()
         if config["ce_weighting"] is not None:
             self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"], 
@@ -104,10 +110,17 @@ class FrustraSeq(pl.LightningModule):
                                                truncation="longest_first",
                                                return_tensors='pt'
                                                ).to(self.device)
-        embedding_rpr = self.encoder(
-            input_ids=ids.input_ids, 
-            attention_mask=ids.attention_mask
-        )
+        if self.config["finetune"]:
+            embedding_rpr = self.encoder(
+                input_ids=ids.input_ids, 
+                attention_mask=ids.attention_mask
+            )
+        else:
+            with torch.no_grad():
+                embedding_rpr = self.encoder(
+                input_ids=ids.input_ids, 
+                attention_mask=ids.attention_mask
+                )
         if "prostt5" in self.plm_model.lower():
             embeddings = embedding_rpr.last_hidden_state[:, 1:].float() # remove the aa token bos and eos and bring to shape
         else:
@@ -138,7 +151,7 @@ class FrustraSeq(pl.LightningModule):
 
         cls_preds = outputs["classification"].squeeze(-1)
         ce_loss = self.ce_loss_fn(cls_preds.flatten(0, 1), frst_classes.flatten()) # shape (batch_size, n_classes(3))
-        
+
         loss = mse_loss + ce_loss
 
         self.log(f'{stage}_mse_loss', mse_loss, on_step=(stage=='train'), on_epoch=True, prog_bar=False, sync_dist=True)
@@ -170,7 +183,7 @@ class FrustraSeq(pl.LightningModule):
         self.test_dict["masked_cls_preds_logits"].append(cls_preds[res_mask].cpu().numpy())
         self.test_dict["cls_preds"].append(torch.argmax(cls_preds, dim=-1).cpu().numpy())
         self.test_dict["masked_cls_preds"].append(torch.argmax(cls_preds, dim=-1)[res_mask].cpu().numpy())
-
+        
         self.test_dict["regr_targets"].append(frst_vals.cpu().numpy())
         self.test_dict["masked_regr_targets"].append(frst_vals[res_mask].cpu().numpy())
         self.test_dict["cls_targets"].append(frst_classes.cpu().numpy())
@@ -182,18 +195,44 @@ class FrustraSeq(pl.LightningModule):
         return None
     
     def predict_step(self, batch, batch_idx):
-        if self.inference_precision == "half":
-            self.encoder.half()
+        #if self.inference_precision == "half":
+            #self.encoder.half()
             #self.CNN.half()
-            print("Using half precision for pLM encoder")
+            #print("Using half precision for pLM encoder")
         full_seq, _, _, _ = batch
-        preds = self.forward(full_seq)
-        self.preds_list.append(preds.cpu().numpy())
-    
+        embeddings = self._plm_forward(full_seq)
+        outputs = self._cnn_forward(embeddings)
+        reg_preds = outputs["regression"].squeeze(-1) # shape (batch_size, seq_length)
+        cls_preds = outputs["classification"].squeeze(-1) # shape (batch_size, seq_length, n_classes(3))
+
+        for seq, reg_pred, cls_pred in zip(full_seq, reg_preds, cls_preds):
+            idx = len(seq)
+            reg_pred = reg_pred[:idx].cpu().numpy()
+            entropies = entropy(softmax(cls_pred[:idx].cpu().numpy(), axis=-1), axis=-1) / np.log(cls_preds.shape[-1])
+            cls_pred = torch.argmax(cls_pred[:idx], dim=-1)[:idx].cpu().numpy()
+            res = {
+                "residue": list(seq),
+                "frustration_index": reg_pred,
+                "frustration_class": cls_pred,
+                "entropy": entropies,
+            }
+            if self.surprisal_dict is not None:
+                z_score = []
+                for aa, val in zip(seq, reg_pred):
+                    mean = self.surprisal_dict[aa]["mean"]
+                    std = self.surprisal_dict[aa]["std"]
+                    z = (val - mean) / std
+                    z_score.append(z)
+                res["surprisal"] = z_score
+            else:
+                print("No surprisal dictionary provided - skipping surprisal z-score calculation.")
+            self.pred_list.append(res)
+        return None
+
     def configure_optimizers(self):
 
         lora_params = [p for n,p in self.encoder.named_parameters() if p.requires_grad and "lora" in n]
-        head_params = [p for n,p in self.named_parameters() if p.requires_grad and "cls_head" in n or "reg_head" in n]
+        head_params = [p for n,p in self.named_parameters() if p.requires_grad and "cls_head" in n or "reg_head" in n or "CNN" in n]
 
         optimizer_grouped_parameters = [
             {"params": lora_params,
@@ -201,6 +240,7 @@ class FrustraSeq(pl.LightningModule):
             {"params": head_params,
             "lr": self.config["architecture"]["lr"], "weight_decay": 0.01},
             ]
+        print(f"RANK {os.environ.get('RANK', -1)}: lora params: {len(lora_params)}, head params: {len(head_params)}")
 
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, betas=(0.9, 0.999), eps=1e-8)
 
@@ -230,17 +270,17 @@ class FrustraSeq(pl.LightningModule):
         pass
     
     def on_train_epoch_start(self):
-        print(f"Starting training epoch {self.current_epoch} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+        print(f"Starting training epoch {self.current_epoch} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", flush=True)
 
     def on_train_epoch_end(self):
-        print(f"Ending training epoch {self.current_epoch} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+        print(f"Ending training epoch {self.current_epoch} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", flush=True)
 
     def on_validation_start(self):
-        print(f"Starting validation {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+        print(f"Starting validation {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", flush=True)
         self.val_dataloader
     
     def on_validation_end(self):
-        print(f"Ending validation {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+        print(f"Ending validation {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", flush=True)
 
     def on_test_epoch_start(self):
         self.test_dict = {"full_seqs": [],
@@ -261,14 +301,11 @@ class FrustraSeq(pl.LightningModule):
         self.test_dict = {key: np.concatenate(value) for key, value in self.test_dict.items() if len(value) > 0}
 
     def on_predict_start(self):
-        self.pred_dict = {"seqs": [],
-                          "regr_preds": [], 
-                          "cls_preds": [],
-                          "z_scores": [],
-                          "entropies": []}
+        self.pred_list = []
     
     def on_predict_end(self):
-        self.preds_dict = {key: np.concatenate(value) for key, value in self.pred_dict.items() if len(value) > 0}
+        #self.preds_dict = {key: np.concatenate(value) for key, value in self.pred_dict.items() if len(value) > 0}
+        pass
 
     @rank_zero_only
     def save_preds_dict(self, set="test"):

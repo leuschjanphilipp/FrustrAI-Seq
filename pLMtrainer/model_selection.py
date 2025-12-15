@@ -117,7 +117,7 @@ def objective(single_trial, config):
 def run_model_selection(config, n_trials=10):
     os.makedirs(config["experiment_name"], exist_ok=True)
     storage = f"sqlite:///{config['experiment_name']}/optuna_study.db"
-    sampler = optuna.samplers.TPESampler(seed=42)
+    sampler = optuna.samplers.TPESampler() 
     study = optuna.create_study(direction="maximize",
                                 study_name="FrustraSeq_ms",
                                 sampler=sampler,
@@ -136,7 +136,7 @@ print(f"OS RANK {RANK}: Launched model selection script.")
 
 n_trials = 1
 config = {
-    "experiment_name": "it5_FrustraSeq_ms",
+    "experiment_name": "it5_protT5",
     "parquet_path": "pLMtrainer/data/frustration/v8_frustration_v2.parquet.gzip",
     "set_key": "split_test", # split_test (gonzalos prots in test) or set_old (split for previous dataset) or split0-3
     "cath_sampling_n": None, # 100,  # None for no sampling
@@ -148,6 +148,7 @@ config = {
     "prefix_prostT5": "<AA2fold>",
     "pLM_dim": 1024,
     "no_label_token": -100,
+    "finetune": True,
     "lora_r": 4,
     "lora_alpha": 1,
     "lora_modules": ["q", "k", "v", "o", "wi", "wo", "w1", "w2", "w3", "fc1", "fc2", "fc3"], # ["query", "key", "value", "fc1", "fc2"] for esm
