@@ -89,6 +89,10 @@ class FrustraSeq(pl.LightningModule):
         else:
             self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"])
 
+        if self.config["use_focal_loss_instead_of_ce"]:
+            print("Using focal loss instead of cross-entropy loss for classification head. Overrides ce_weighting if set.")
+            self.ce_loss_fn = self.focal_loss
+
         print(f"RANK {os.environ.get('RANK', -1)}: Model initialized.")
 
     def forward(self, full_seq):
@@ -175,22 +179,22 @@ class FrustraSeq(pl.LightningModule):
         outputs = self._cnn_forward(embeddings) 
 
         reg_preds = outputs["regression"].squeeze(-1)
-        self.test_dict["regr_preds"].append(reg_preds.cpu().numpy())
-        self.test_dict["masked_regr_preds"].append(reg_preds[res_mask].cpu().numpy())
+        self.test_dict["regr_preds"].append(reg_preds.detach().float().cpu().numpy())
+        self.test_dict["masked_regr_preds"].append(reg_preds[res_mask].detach().float().cpu().numpy())
 
         cls_preds = outputs["classification"].squeeze(-1) 
-        self.test_dict["cls_preds_logits"].append(cls_preds.cpu().numpy())
-        self.test_dict["masked_cls_preds_logits"].append(cls_preds[res_mask].cpu().numpy())
-        self.test_dict["cls_preds"].append(torch.argmax(cls_preds, dim=-1).cpu().numpy())
-        self.test_dict["masked_cls_preds"].append(torch.argmax(cls_preds, dim=-1)[res_mask].cpu().numpy())
-        
-        self.test_dict["regr_targets"].append(frst_vals.cpu().numpy())
-        self.test_dict["masked_regr_targets"].append(frst_vals[res_mask].cpu().numpy())
-        self.test_dict["cls_targets"].append(frst_classes.cpu().numpy())
-        self.test_dict["masked_cls_targets"].append(frst_classes[res_mask].cpu().numpy())
+        self.test_dict["cls_preds_logits"].append(cls_preds.detach().float().cpu().numpy())
+        self.test_dict["masked_cls_preds_logits"].append(cls_preds[res_mask].detach().float().cpu().numpy())
+        self.test_dict["cls_preds"].append(torch.argmax(cls_preds, dim=-1).detach().int().cpu().numpy())
+        self.test_dict["masked_cls_preds"].append(torch.argmax(cls_preds, dim=-1)[res_mask].detach().int().cpu().numpy())
+
+        self.test_dict["regr_targets"].append(frst_vals.detach().float().cpu().numpy())
+        self.test_dict["masked_regr_targets"].append(frst_vals[res_mask].detach().float().cpu().numpy())
+        self.test_dict["cls_targets"].append(frst_classes.detach().int().cpu().numpy())
+        self.test_dict["masked_cls_targets"].append(frst_classes[res_mask].detach().int().cpu().numpy())
 
         self.test_dict["full_seqs"].append(np.array(full_seq))
-        self.test_dict["masks"].append(res_mask.cpu().numpy())
+        self.test_dict["masks"].append(res_mask.detach().bool().cpu().numpy())
 
         return None
     
@@ -207,9 +211,9 @@ class FrustraSeq(pl.LightningModule):
 
         for seq, reg_pred, cls_pred in zip(full_seq, reg_preds, cls_preds):
             idx = len(seq)
-            reg_pred = reg_pred[:idx].cpu().numpy()
-            entropies = entropy(softmax(cls_pred[:idx].cpu().numpy(), axis=-1), axis=-1) / np.log(cls_preds.shape[-1])
-            cls_pred = torch.argmax(cls_pred[:idx], dim=-1)[:idx].cpu().numpy()
+            reg_pred = reg_pred[:idx].detach().float().cpu().numpy()
+            entropies = entropy(softmax(cls_pred[:idx].detach().float().cpu().numpy(), axis=-1), axis=-1) / np.log(cls_preds.shape[-1])
+            cls_pred = torch.argmax(cls_pred[:idx], dim=-1)[:idx].detach().int().cpu().numpy()
             res = {
                 "residue": list(seq),
                 "frustration_index": reg_pred,
@@ -248,7 +252,7 @@ class FrustraSeq(pl.LightningModule):
         total_steps = self.trainer.estimated_stepping_batches
 
         warmup_scheduler = LinearLR(optimizer, start_factor=0.3, end_factor=1, total_iters=warmup_steps)
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(total_steps - warmup_steps), eta_min=0.0)
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(total_steps - warmup_steps), eta_min=self.config["architecture"]["lr"] * 0.1)
         scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
         return {
@@ -314,6 +318,12 @@ class FrustraSeq(pl.LightningModule):
 
         if self.trainer.global_rank == 0:
             np.savez_compressed(f"./{self.experiment_name}/{set}_preds.npz", **self.test_dict)
+
+    def focal_loss(self, inputs, targets, alpha=0.25, gamma=2.0):
+        ce_loss = nn.CrossEntropyLoss(ignore_index=self.config["no_label_token"], reduction='none')(inputs, targets)
+        pt = torch.exp(-ce_loss)
+        focal_loss = alpha * (1 - pt) ** gamma * ce_loss
+        return focal_loss.mean()
 
     @staticmethod
     #@rank_zero_only

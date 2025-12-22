@@ -50,6 +50,7 @@ class FrustrationDataModule(LightningDataModule):
             max_len = self.df["full_seq"].str.len().max()
             res_idx_mask = torch.zeros((len(self.df), max_len), dtype=torch.bool)
             frst_vals = torch.zeros((len(self.df), max_len), dtype=torch.float)
+            frst_vals[:] = -100  # Initialize to -100 for no frst value info
             frst_classes = torch.zeros((len(self.df), max_len), dtype=torch.long)
             frst_classes[:] = -100  # Initialize to -100 for no frst class info
             print("Initialized res_idx_mask and frst_vals tensors")
