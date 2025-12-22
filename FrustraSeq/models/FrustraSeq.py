@@ -16,7 +16,7 @@ from transformers import T5Tokenizer, T5EncoderModel, EsmModel, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 
 sys.path.append('..')
-sys.path.append('pLMtrainer')
+sys.path.append('FrustraSeq')
 
 class FrustraSeq(pl.LightningModule):
     def __init__(self, config):
@@ -84,6 +84,7 @@ class FrustraSeq(pl.LightningModule):
         )
         self.mse_loss_fn = nn.MSELoss()
         if config["ce_weighting"] is not None:
+            print("Using class-weighted cross-entropy loss.")
             self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=config["no_label_token"], 
                                                   weight=torch.Tensor(config["ce_weighting"])) 
         else:
@@ -91,7 +92,9 @@ class FrustraSeq(pl.LightningModule):
 
         if self.config["use_focal_loss_instead_of_ce"]:
             print("Using focal loss instead of cross-entropy loss for classification head. Overrides ce_weighting if set.")
-            self.ce_loss_fn = self.focal_loss
+            self.ce_loss_fn = FocalLoss(alpha=torch.tensor([0.51, 0.14, 0.17]), #normalized inverse class frequencies (13,48,39%)
+                                        gamma=2,
+                                        ignore_index=self.config["no_label_token"])
 
         print(f"RANK {os.environ.get('RANK', -1)}: Model initialized.")
 
@@ -319,15 +322,10 @@ class FrustraSeq(pl.LightningModule):
         if self.trainer.global_rank == 0:
             np.savez_compressed(f"./{self.experiment_name}/{set}_preds.npz", **self.test_dict)
 
-    def focal_loss(self, inputs, targets, alpha=0.25, gamma=2.0):
-        ce_loss = nn.CrossEntropyLoss(ignore_index=self.config["no_label_token"], reduction='none')(inputs, targets)
-        pt = torch.exp(-ce_loss)
-        focal_loss = alpha * (1 - pt) ** gamma * ce_loss
-        return focal_loss.mean()
-
     @staticmethod
     #@rank_zero_only
     def suggest_params(trial):
+
         print(f"OS RANK {os.environ.get('RANK', -1)}. Suggesting params.")
         architecture = {}
         architecture["lr"] = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
@@ -340,3 +338,27 @@ class FrustraSeq(pl.LightningModule):
         architecture["hidden_dim_0"] = trial.suggest_categorical("hidden_dim_0", [32, 64, 128, 256, 512])
         architecture["hidden_dim_1"] = trial.suggest_categorical("hidden_dim_1", [8, 16, 32, 64])
         return architecture
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=torch.tensor([0.51, 0.14, 0.17]), gamma=2, ignore_index=-100):
+        super().__init__()
+        self.register_buffer("alpha", alpha)
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.ce = nn.CrossEntropyLoss(
+            ignore_index=ignore_index,
+            reduction="none"
+        )
+
+    def forward(self, inputs, targets):
+        ce_loss = self.ce(inputs, targets)
+        pt = torch.exp(-ce_loss)
+
+        valid = targets != self.ignore_index
+
+        alpha_t = torch.ones_like(ce_loss)
+        alpha_t[valid] = self.alpha[targets[valid]]
+
+        loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
+        return loss[valid].mean()
+

@@ -14,10 +14,10 @@ from pytorch_lightning.strategies import DDPStrategy
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 
 sys.path.append('..')
-sys.path.append('pLMtrainer')
-from pLMtrainer.models.frustraSeq import FrustraSeq
-from pLMtrainer.dataloader import FrustrationDataModule
-from pLMtrainer.utils import set_signal, HaicoreCheckpointOnExit, run_eval_metrics
+sys.path.append('FrustraSeq')
+from FrustraSeq.models.frustraSeq import FrustraSeq
+from FrustraSeq.dataloader import FrustrationDataModule
+from FrustraSeq.utils import set_signal, HaicoreCheckpointOnExit, run_eval_metrics
 
 
 def objective(single_trial, config):
@@ -59,7 +59,7 @@ def objective(single_trial, config):
                                  save_top_k=1,
                                  mode='min',
                                  save_weights_only=True)
-    logger = WandbLogger(project="pLMtrainer_FrustraSeq_",
+    logger = WandbLogger(project="FrustraSeq_FrustraSeq_",
                          name=config["experiment_name"],
                          save_dir=f"./{config['experiment_name']}",
                          log_model=False,
@@ -137,14 +137,14 @@ print(f"OS RANK {RANK}: Launched model selection script.")
 n_trials = 1
 config = {
     "experiment_name": "it5_protT5",
-    "parquet_path": "pLMtrainer/data/frustration/v8_frustration_v2.parquet.gzip",
+    "parquet_path": "FrustraSeq/data/frustration/v8_frustration_v2.parquet.gzip",
     "set_key": "split_test", # split_test (gonzalos prots in test) or set_old (split for previous dataset) or split0-3
     "cath_sampling_n": None, # 100,  # None for no sampling
     "batch_size": 16, #16 for all modules for FT; 64 maybe more for no FT
     "num_workers": 10,
     "max_seq_length": 512,
     "precision": "full",
-    "pLM_model": "pLMtrainer/data/protT5",
+    "pLM_model": "FrustraSeq/data/protT5",
     "prefix_prostT5": "<AA2fold>",
     "pLM_dim": 1024,
     "no_label_token": -100,

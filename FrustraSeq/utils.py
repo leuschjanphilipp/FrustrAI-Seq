@@ -87,7 +87,7 @@ def run_eval_metrics(preds_file, regression=True, classification=True, bin_regre
     return output_metrics
 
 ################################################
-### HAICORE SLURM REQUEUE HANDLING UTILITIES ###
+### JUELICH SLURM REQUEUE HANDLING UTILITIES ###
 ################################################
 
 def get_callbacks(config: dict):

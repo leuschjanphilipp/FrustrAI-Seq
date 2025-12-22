@@ -7,10 +7,10 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import CSVLogger
 
 sys.path.append('..')
-sys.path.append('pLMtrainer')
-from pLMtrainer.models.frustraSeq import FrustraSeq
-from pLMtrainer.dataloader import FrustrationDataModule
-from pLMtrainer.utils import run_eval_metrics
+sys.path.append('FrustraSeq')
+from FrustraSeq.models.FrustraSeq import FrustraSeq
+from FrustraSeq.dataloader import FrustrationDataModule
+from FrustraSeq.utils import run_eval_metrics
 
 with open(f"./it5_ABL_protT5_CW/config.yaml", 'r') as f:
     config = yaml.safe_load(f)
