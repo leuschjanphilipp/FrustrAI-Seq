@@ -207,8 +207,15 @@ class FrustraSeq(pl.LightningModule):
             #self.CNN.half()
             #print("Using half precision for pLM encoder")
         full_seq, _, _, _ = batch
-        embeddings = self._plm_forward(full_seq)
-        outputs = self._cnn_forward(embeddings)
+        self.max_seq_length = max([len(seq) for seq in full_seq])
+        #print(f"Predicting batch with max sequence length: {self.max_seq_length}")
+        with torch.no_grad():
+            try:
+                embeddings = self._plm_forward(full_seq)
+            except RuntimeError as e:
+                print(f"RuntimeError during PLM forward pass: {e}")
+                return None
+            outputs = self._cnn_forward(embeddings)
         reg_preds = outputs["regression"].squeeze(-1) # shape (batch_size, seq_length)
         cls_preds = outputs["classification"].squeeze(-1) # shape (batch_size, seq_length, n_classes(3))
 
