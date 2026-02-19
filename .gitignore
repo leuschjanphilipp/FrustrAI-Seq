@@ -1,4 +1,4 @@
-data/*
+data/*/
 notebooks/lightning_logs/*
 notebooks/checkpoints/*
 notebooks/*/
@@ -7,3 +7,6 @@ notebooks/*/
 *.npz
 *.parquet.gzip
 *.parquet
+*.egg-info
+FrustAI-Seq
+prot_t5_xl_half_uniref50-enc

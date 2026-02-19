@@ -1,0 +1,35 @@
+architecture:
+  dropout: 0.1
+  hidden_dim_0: 64
+  hidden_dim_1: 10
+  kernel_1: 7
+  kernel_2: 7
+  lr: 0.0001
+  pLM_dim: 1024
+  padding_1: 3
+  padding_2: 3
+batch_size: 1
+cath_sampling_n: 10
+ce_weighting:
+- 2.65750085
+- 0.68876299
+- 0.8533673
+checkpoint_path: FrustrAI-Seq/FrustraSeq_CW.ckpt
+experiment_name: FrustrAI-Seq_Prediction
+fit_dataset: leuschj/Funstration
+inference_dataset: null
+lora_alpha: 1
+lora_modules:
+- q
+- k
+- v
+- o
+lora_r: 4
+max_seq_length: 512
+no_label_token: -100
+notes: ''
+num_workers: 1
+pLM_model: data/protT5
+precision: half
+sample_size: null
+verbose: true
