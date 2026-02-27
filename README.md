@@ -7,13 +7,13 @@ FrustrAI-Seq is a deep learning tool for predicting per-residue local energetic 
 ```bash
 mkdir FrustrAISeq
 cd FrustrAISeq
-conda create -n frustraiseq -y 
+conda create -n frustraiseq python=3.12 -y
 activate frustraiseq
-git clone git@github.com:leuschjanphilipp/FrustrAI-Seq.git
+git clone https://github.com/leuschjanphilipp/FrustrAI-Seq.git
 ```
 Proceed by installing pytorch depending on your system. Look at their installation guides [here](https://pytorch.org/get-started/locally/).
 ```bash
-pip install requirements.txt
+pip install -r requirements.txt
 pip install -e . --no-deps
 ```
 
@@ -29,10 +29,13 @@ SEVENCE
 EOF
 
 # Run prediction
+frustraiseq predict -i data/example_seqs.fasta -o data/output.csv --config src/frustraiseq/config/default_config.yml --checkpoint path/to/model.ckpt --plm-path /path/to/user-plm --batch-size 16 --accelerator gpu --verbose True
+
+# Or use the short version in which pLM and model checkpoint will be downloaded from Huggingface.
 frustraiseq predict -i data/example_seqs.fasta -o data/output.csv
 ```
 
-Additionally config, pLM and checkpoint can be added as CLI arguments or in the config.
+Additionally config, pLM and checkpoint can also be specified in the config.
 
 See `frustraiseq --help` for all options.
 

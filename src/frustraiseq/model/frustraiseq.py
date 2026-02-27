@@ -9,10 +9,11 @@ import pytorch_lightning as pl
 from scipy.stats import entropy
 from scipy.special import softmax
 
-from lightning.pytorch.utilities.rank_zero import rank_zero_only
-from torch.optim.lr_scheduler import LinearLR
 from transformers import T5EncoderModel
 from peft import LoraConfig, get_peft_model
+from torch.optim.lr_scheduler import LinearLR
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
+#from huggingface_hub import PyTorchModelHubMixin
 
 class FrustrAISeq(pl.LightningModule):
     def __init__(self, config):
@@ -142,7 +143,6 @@ class FrustrAISeq(pl.LightningModule):
         embeddings = self._plm_forward(input_ids, attention_mask)
         outputs = self._cnn_forward(embeddings)
 
-        #dict defined in on_test_epoch_start()
         #regr preds
         reg_preds = outputs["regression"].squeeze(-1)
         self.test_dict["regr_preds"].append(reg_preds.detach().float().cpu().numpy())
@@ -159,7 +159,8 @@ class FrustrAISeq(pl.LightningModule):
         self.test_dict["cls_targets"].append(frst_classes.detach().int().cpu().numpy())
         self.test_dict["masked_cls_targets"].append(frst_classes[res_mask].detach().int().cpu().numpy())
         #misc
-        self.test_dict["full_seqs"].append(np.array(full_seq))
+        self.test_dict["input_ids"].append(np.array(input_ids.detach().cpu()))
+        self.test_dict["full_seqs"].append(np.array(self.tokenizer.batch_decode(input_ids)))
         self.test_dict["masks"].append(res_mask.detach().bool().cpu().numpy())
         
         #test loss
@@ -175,7 +176,7 @@ class FrustrAISeq(pl.LightningModule):
         self.log(f'test_ce_loss', ce_loss, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log(f'test_loss', loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
-    
+
     def old_predict_step(self, batch, batch_idx):
         full_seq, _, _, _ = batch
         self.max_seq_length = max([len(seq) for seq in full_seq])
@@ -328,6 +329,7 @@ class FrustrAISeq(pl.LightningModule):
 
     def on_test_epoch_start(self):
         self.test_dict = {"full_seqs": [],
+                          "input_ids": [],
                           "masks": [],
                           "regr_preds": [], 
                           "cls_preds": [], 
@@ -339,6 +341,11 @@ class FrustrAISeq(pl.LightningModule):
                           "masked_cls_targets": [],
                           "cls_preds_logits": [],
                           "masked_cls_preds_logits": []}
+        
+        from transformers import T5Tokenizer
+        self.tokenizer = T5Tokenizer.from_pretrained(self.config["pLM_model"], 
+                                                     do_lower_case=False, 
+                                                     max_length=self.config["max_seq_length"])
 
     def on_test_epoch_end(self):
         #concat the batches
@@ -398,4 +405,235 @@ class FocalLoss(nn.Module):
 
         loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
         return loss[valid].mean()
+'''
+def save_pretrained(self, save_directory, **kwargs):
+        """
+        Save the model to HuggingFace Hub format with merged LoRA weights.
+        This keeps the Lightning Module structure but makes the encoder weights
+        compatible with HuggingFace's from_pretrained.
+        """
+        import os
+        import json
+        from pathlib import Path
+        
+        save_directory = Path(save_directory)
+        save_directory.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Save the merged encoder (ProtT5 + LoRA merged)
+        if hasattr(self.encoder, 'merge_and_unload'):
+            print("Merging LoRA weights into base model...")
+            merged_encoder = self.encoder.merge_and_unload()
+        elif hasattr(self.encoder, 'merge_adapter'):
+            print("Merging adapter weights...")
+            self.encoder.merge_adapter()
+            merged_encoder = self.encoder.get_base_model()
+        else:
+            print("Warning: No LoRA merging method found. Saving encoder as-is.")
+            merged_encoder = self.encoder
+        
+        # Save the encoder in HuggingFace format
+        encoder_dir = save_directory / "encoder"
+        encoder_dir.mkdir(exist_ok=True)
+        merged_encoder.save_pretrained(encoder_dir)
+        print(f"Saved merged encoder to {encoder_dir}")
+        
+        # 2. Save the full Lightning checkpoint (for resuming training)
+        checkpoint_path = save_directory / "lightning_model.ckpt"
+        torch.save({
+            'state_dict': self.state_dict(),
+            'config': self.config,
+        }, checkpoint_path)
+        print(f"Saved Lightning checkpoint to {checkpoint_path}")
+        
+        # 3. Save just the CNN and head weights (for inference)
+        heads_state_dict = {
+            'CNN': self.CNN.state_dict(),
+            'reg_head': self.reg_head.state_dict(),
+            'cls_head': self.cls_head.state_dict(),
+        }
+        heads_path = save_directory / "frustration_heads.pt"
+        torch.save(heads_state_dict, heads_path)
+        print(f"Saved frustration prediction heads to {heads_path}")
+        
+        # 4. Save configuration
+        config_path = save_directory / "config.json"
+        with open(config_path, 'w') as f:
+            json.dump(self.config, f, indent=2)
+        print(f"Saved config to {config_path}")
+        
+        # 5. Save model card
+        self._save_model_card(save_directory)
+        
+        print(f"\n✓ Model saved to {save_directory}")
+        print(f"  - Encoder (HF format): {encoder_dir}")
+        print(f"  - Lightning checkpoint: {checkpoint_path}")
+        print(f"  - Prediction heads: {heads_path}")
+        print(f"  - Config: {config_path}")
+        
+    def _save_model_card(self, save_directory):
+        """Create a README.md model card"""
+        model_card = f"""---
+library_name: pytorch-lightning
+tags:
+- protein
+- frustration
+- deep-learning
+- transformers
+- peft
+---
 
+# FrustrAI-Seq
+
+Per-residue local energetic frustration prediction for protein sequences.
+
+## Model Description
+
+This model predicts local energetic frustration for each residue in a protein sequence using:
+- **Encoder**: ProtT5-XL with LoRA fine-tuning (merged weights)
+- **Architecture**: CNN layers on top of protein language model embeddings
+- **Outputs**: 
+  - Frustration index (regression)
+  - Frustration class (3-class classification)
+  - Uncertainty (entropy)
+
+## Usage
+
+### Option 1: Load for Training/Fine-tuning (Lightning)
+
+```python
+from frustraiseq.model.frustraiseq import FrustrAISeq
+import json
+
+# Load config
+with open("config.json") as f:
+    config = json.load(f)
+
+# Load from Lightning checkpoint
+model = FrustrAISeq.load_from_checkpoint(
+    "lightning_model.ckpt",
+    config=config
+)
+```
+
+### Option 2: Load for Inference (HuggingFace style)
+
+```python
+from transformers import T5EncoderModel
+from frustraiseq.model.frustraiseq import FrustrAISeq
+import torch
+import json
+
+# Load merged encoder
+encoder = T5EncoderModel.from_pretrained("./encoder")
+
+# Load config
+with open("config.json") as f:
+    config = json.load(f)
+
+# Create model and load heads
+model = FrustrAISeq(config)
+model.encoder = encoder
+
+# Load frustration prediction heads
+heads_state = torch.load("frustration_heads.pt")
+model.CNN.load_state_dict(heads_state['CNN'])
+model.reg_head.load_state_dict(heads_state['reg_head'])
+model.cls_head.load_state_dict(heads_state['cls_head'])
+
+model.eval()
+```
+
+### Option 3: Use the CLI
+
+```bash
+frustraiseq predict -i input.fasta -o output.csv
+```
+
+## Model Architecture
+
+- **Input**: Protein sequence (amino acids)
+- **Encoder**: ProtT5-XL-UniRef50 (1024 dim) with LoRA (r={self.config.get('lora_r', 4)})
+- **CNN**: {self.config['architecture']['kernel_1']}x{self.config['architecture']['hidden_dim_0']} → {self.config['architecture']['kernel_2']}x{self.config['architecture']['hidden_dim_1']}
+- **Regression Head**: Frustration index prediction
+- **Classification Head**: 3-class frustration (minimally/neutral/highly frustrated)
+
+## Training
+
+- **Dataset**: Funstration dataset
+- **Loss**: MSE (regression) + Weighted CE (classification)
+- **Optimizer**: AdamW with cosine annealing
+- **LoRA**: Fine-tuning only q,k,v,o modules
+
+## Citation
+
+```bibtex
+@article{{frustraiseq,
+  title={{FrustrAI-Seq: Per-Residue Frustration Prediction}},
+  author={{Your Name}},
+  year={{2024}}
+}}
+```
+
+## Files in this repository
+
+- `encoder/`: Merged ProtT5 + LoRA weights (HuggingFace format)
+- `lightning_model.ckpt`: Full Lightning checkpoint (for training)
+- `frustration_heads.pt`: CNN and prediction head weights
+- `config.json`: Model configuration
+- `README.md`: This file
+"""
+        
+        readme_path = save_directory / "README.md"
+        with open(readme_path, 'w') as f:
+            f.write(model_card)
+        print(f"Saved model card to {readme_path}")
+
+    @classmethod
+    def from_pretrained(cls, model_path, **kwargs):
+        """
+        Load model from HuggingFace Hub format.
+        This allows loading with: model = FrustrAISeq.from_pretrained("path/to/model")
+        """
+        from pathlib import Path
+        import json
+        
+        model_path = Path(model_path)
+        
+        # Load config
+        config_path = model_path / "config.json"
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Update config with kwargs
+        config.update(kwargs)
+        
+        # Try loading from Lightning checkpoint first
+        lightning_ckpt = model_path / "lightning_model.ckpt"
+        if lightning_ckpt.exists():
+            print(f"Loading from Lightning checkpoint: {lightning_ckpt}")
+            return cls.load_from_checkpoint(str(lightning_ckpt), config=config)
+        
+        # Otherwise, load from HuggingFace format
+        print("Loading from HuggingFace format...")
+        
+        # Create model
+        model = cls(config)
+        
+        # Load merged encoder
+        encoder_path = model_path / "encoder"
+        if encoder_path.exists():
+            from transformers import T5EncoderModel
+            model.encoder = T5EncoderModel.from_pretrained(encoder_path)
+            print(f"Loaded encoder from {encoder_path}")
+        
+        # Load prediction heads
+        heads_path = model_path / "frustration_heads.pt"
+        if heads_path.exists():
+            heads_state = torch.load(heads_path, map_location='cpu')
+            model.CNN.load_state_dict(heads_state['CNN'])
+            model.reg_head.load_state_dict(heads_state['reg_head'])
+            model.cls_head.load_state_dict(heads_state['cls_head'])
+            print(f"Loaded prediction heads from {heads_path}")
+        
+        return model
+'''

@@ -1,67 +1,52 @@
 import os
 import sys
 import torch
+import argparse
 import numpy as np
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 
-sys.path.append('..')
-sys.path.append('FrustraSeq')
-from src.model.FrustraSeq import FrustraSeq
-from src.data import FrustrationDataModule
-from FrustrAISeq.src.frustraiseq.utils.utils import run_eval_metrics
+from frustraiseq.config.default_config import DEFAULT_CONFIG
+from frustraiseq.data.dataloader import FunstrationDataModule
+from frustraiseq.model.frustraiseq import FrustrAISeq
+from frustraiseq.utils.utils import run_eval_metrics
 
-config = {
-    "experiment_name": "it5_DEB_FOCAL",
-    "parquet_path": "FrustraSeq/data/frustration/v8_frustration_v2.parquet.gzip",
-    "set_key": "split_test", # split_test (gonzalos prots in test) or set_old (split for previous dataset) or split0-3
-    "cath_sampling_n": 100, # 100,  # None for no sampling
-    "batch_size": 512, #32 for FT; 512 else
-    "num_workers": 10,
-    "max_seq_length": 512,
-    "precision": "full",
-    "pLM_model": "FrustraSeq/data/protT5",
-    "prefix_prostT5": "<AA2fold>",
-    "pLM_dim": 1024, #1280 for ESM
-    "no_label_token": -100,
-    "finetune": False,
-    "lora_r": 4,
-    "lora_alpha": 1,
-    "lora_modules": ["q", "k", "v", "o"], #"wi", "wo", "w1", "w2", "w3", "fc1", "fc2", "fc3"], # ["query", "key", "value", "fc1", "fc2"] for esm
-    "ce_weighting": None, #[2.65750085, 0.68876299, 0.8533673], #[10.0, 2.0, 2.5], [(1/0.13)/(1/0.13), (1/0.48)/(1/0.13), (1/0.39)/(1/0.13)]
-    "use_focal_loss_instead_of_ce": True,
-    "notes": "",
-}
-architecture = {}
-architecture["lr"] = 1e-4
-architecture["dropout"] = 0.1
-architecture["kernel_1"] = 7
-architecture["padding_1"] = architecture["kernel_1"] // 2  # to keep same length
-architecture["kernel_2"] = 7
-architecture["padding_2"] = architecture["kernel_2"] // 2  # to keep same length
-architecture["hidden_dim_0"] = 64
-architecture["hidden_dim_1"] = 10
-config["architecture"] = architecture
+
+parser = argparse.ArgumentParser(description="Train FrustrAI-Seq model")
+parser.add_argument("--experiment_name", type=str, default="train",)
+parser.add_argument("--fit_dataset", type=str, default="leuschj/Funstration",)
+parser.add_argument("--batch_size", type=int, default=32,)
+parser.add_argument("--plm_model", type=str, default="./data/protT5",)
+parser.add_argument("--split_key", type=str, default="split_0",)
+parser.add_argument("--num_workers", type=int, default=10,)
+parser.add_argument("--cath_sampling_n", type=int, default=None)
+args = parser.parse_args()
+
+config = DEFAULT_CONFIG.copy()
+
+config["experiment_name"] = args.experiment_name
+config["fit_dataset"] = args.fit_dataset
+config["batch_size"] = args.batch_size
+config["pLM_model"] = args.plm_model
+config["split_key"] = args.split_key
+config["num_workers"] = args.num_workers
+config["cath_sampling_n"] = args.cath_sampling_n
 
 #torch.set_float32_matmul_precision("high")
 trainer_precision = "bf16-mixed" #"32"
+find_unused = False
 
-if config["finetune"]:
-    find_unused = False
-else:
-    find_unused = True
-
-data_module = FrustrationDataModule(df=None,
-                                    parquet_path=config["parquet_path"], 
+data_module = FunstrationDataModule(config=config,
+                                    fit_dataset=config["fit_dataset"], 
                                     batch_size=config["batch_size"],
-                                    set_key=config["set_key"],
+                                    split_key=config["split_key"],
                                     max_seq_length=config["max_seq_length"], 
                                     num_workers=config["num_workers"], # 0 
                                     persistent_workers=True, # Flase
                                     pin_memory=True, # Flase
-                                    prefetch_factor=1, #!
+                                    prefetch_factor=2, #!
                                     sample_size=None,
                                     cath_sampling_n=config["cath_sampling_n"])
 
@@ -76,17 +61,17 @@ checkpoint = ModelCheckpoint(monitor="val_loss",
                                 save_top_k=1,
                                 mode='min',
                                 save_weights_only=False)
-logger = WandbLogger(project="FrustraSeq",
+logger = WandbLogger(project="FrustrAI-Seq",
                         name=config["experiment_name"],
                         save_dir=f"./{config['experiment_name']}",
                         log_model=False,
-                        offline=True,
+                        offline=False, #lets see
                         )
 lr_logger = LearningRateMonitor(logging_interval='step')
 
 trainer = Trainer(default_root_dir=f"./{config['experiment_name']}",
                 accelerator="gpu",
-                devices=4,
+                devices=2,
                 strategy=DDPStrategy(find_unused_parameters=find_unused),
                 max_epochs=20,
                 logger=logger,
@@ -97,7 +82,7 @@ trainer = Trainer(default_root_dir=f"./{config['experiment_name']}",
                 gradient_clip_val=1,
                 enable_progress_bar=False,
                 deterministic=False,
-                accumulate_grad_batches=1, # used 8 for FT, maybe less for for FT in future.
+                accumulate_grad_batches=8, # used 8 for FT, maybe less for for FT in future.
                 )
 
 ckpt_path = None
@@ -109,7 +94,7 @@ if os.path.exists(ckpt_file):
 else:
     print(f"RANK {os.environ.get('RANK', -1)}: Starting new training run")
 
-model = FrustraSeq(config=config)
+model = FrustrAISeq(config=config)
 
 trainer.fit(
     model,
@@ -129,12 +114,13 @@ test_trainer = Trainer(accelerator="gpu", # gpu
                         )
 #tune on val set
 data_module.test_dataloader = data_module.val_dataloader
-model = FrustraSeq.load_from_checkpoint(checkpoint_path=f"{config['experiment_name']}/best_val_model.ckpt",
+model = FrustrAISeq.load_from_checkpoint(checkpoint_path=f"{config['experiment_name']}/best_val_model.ckpt",
                                         config=config)
 test_trainer.test(model, datamodule=data_module)
 model.save_preds_dict(set="val")
 
 metrics = run_eval_metrics(np.load(f"./{config['experiment_name']}/val_preds.npz"), return_cls_report_dict=False)
+print(f"Metrics for {config['experiment_name']} - Validation Set:")
 print(metrics["cls_report"])
 print(metrics["pearson_r"])
 print(metrics["mean_absolute_error"])

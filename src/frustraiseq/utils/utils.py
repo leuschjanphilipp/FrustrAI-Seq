@@ -53,6 +53,7 @@ def run_eval_metrics(preds_file, regression=True, classification=True, bin_regre
         preds_dict = {key: preds_file[key] for key in preds_file.files}
     else:
         preds_dict = preds_file
+    '''
     padded_seqs = []
     for seq in preds_dict["full_seqs"]:
         if len(seq) < max_seq_length:
@@ -65,6 +66,7 @@ def run_eval_metrics(preds_file, regression=True, classification=True, bin_regre
     padded_seqs = np.array(padded_seqs)
     seq_array = np.array([list(seq) for seq in padded_seqs])
     preds_dict['masked_residues'] = seq_array[preds_dict["masks"]]
+    '''
     
     output_metrics = {"preds_dict": preds_dict}
     
