@@ -72,25 +72,17 @@ class InferenceDataset(Dataset):
     def __len__(self):
         return len(self.full_seq)
     
-    def _tokenize_seqs(self, seqs):
-        # when in inference mode dont apply max length restriction and pad to longest in batch
-        max_seq_length = max([len(seq) for seq in seqs])
-        full_seq_idx = [" ".join(seq) for seq in seqs]
-        
-        # Use tokenizer's __call__ method (batch_encode_plus was removed in transformers v5.x)
-        seqs_tokenized = self.tokenizer(full_seq_idx, 
-                                        add_special_tokens=True, 
-                                        max_length=max_seq_length,
-                                        padding="max_length",
-                                        truncation="longest_first",
-                                        return_tensors='pt')
-        return seqs_tokenized
-
     def __getitem__(self, idx):
+        return self.full_seq[idx], self.id[idx]
 
-        seqs_tokenized = self._tokenize_seqs([self.full_seq[idx]])
-
-        return (seqs_tokenized["input_ids"].squeeze(0), 
-                seqs_tokenized["attention_mask"].squeeze(0),
-                self.full_seq[idx],
-                self.id[idx])
+    def collate_fn(self, batch):
+        seqs, ids = zip(*batch)
+        spaced = [" ".join(seq) for seq in seqs]
+        tokenized = self.tokenizer(
+            list(spaced),
+            add_special_tokens=True,
+            padding="longest",
+            truncation=False,
+            return_tensors="pt",
+        )
+        return tokenized["input_ids"], tokenized["attention_mask"], list(seqs), list(ids)

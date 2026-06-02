@@ -77,6 +77,7 @@ class FrustrAISeq(pl.LightningModule):
             self.surprisal_dict = json.load(f)
         self.surprisal_mean = torch.tensor([self.surprisal_dict[aa]["mean"] for aa in self.surprisal_dict], device=self.device)
         self.surprisal_std = torch.tensor([self.surprisal_dict[aa]["std"] for aa in self.surprisal_dict], device=self.device)
+        self.aa_to_idx = {aa: i for i, aa in enumerate(self.surprisal_dict)}
 
         if config["verbose"]:
             print(f"RANK {os.environ.get('RANK', -1)}: Loaded pLM model {self.plm_model}")
@@ -216,58 +217,55 @@ class FrustrAISeq(pl.LightningModule):
         return None
     
     def predict_step(self, batch, batch_idx):
-        input_ids, attention_mask, full_seq, id = batch
-        self.max_seq_length = max([len(seq) for seq in input_ids])
-        #print(f"Predicting batch with max sequence length: {self.max_seq_length}")
-        #try catch case for very long sequences that might cause OOM - skip them and print a warning
+        input_ids, attention_mask, full_seq, ids = batch
+
         try:
             embeddings = self._plm_forward(input_ids, attention_mask)
         except RuntimeError as e:
-            print(f"RuntimeError during PLM forward pass. Seq(s):\n{input_ids}\n{e}")
+            print(f"RuntimeError during PLM forward pass: {e}")
             return None
-        
-        outputs = self._cnn_forward(embeddings)
-        reg_preds = outputs["regression"].squeeze(-1)          # (B, L)
-        cls_logits = outputs["classification"]                 # (B, L, C)
 
-        probs = torch.softmax(cls_logits, dim=-1)
-        entropies = (
-            -(probs * torch.log(probs + 1e-9)).sum(dim=-1)
-            / torch.log(torch.tensor(probs.shape[-1], device=self.device))
-        )
-        cls_preds = torch.argmax(cls_logits, dim=-1)
+        outputs   = self._cnn_forward(embeddings)
+        reg_preds = outputs["regression"].squeeze(-1)   # (B, L)
+        cls_logits = outputs["classification"]          # (B, L, 3)
 
-        results = []
+        probs     = torch.softmax(cls_logits, dim=-1)   # (B, L, 3)
+        cls_preds = probs.argmax(dim=-1)                # (B, L)
+        log_n     = torch.log(torch.tensor(float(probs.shape[-1]), device=self.device))
+        entropies = -(probs * (probs + 1e-9).log()).sum(dim=-1) / log_n  # (B, L)
 
-        for i, seq in enumerate(full_seq):
-            L = len(seq)
+        surp_mean = self.surprisal_mean.to(self.device)
+        surp_std  = self.surprisal_std.to(self.device)
 
-            reg_i = reg_preds[i, :L]
+        rows = []
+        for i, (seq, seq_id) in enumerate(zip(full_seq, ids)):
+            L = min(len(seq), reg_preds.shape[1])  # clamp for truncated sequences
+
+            reg_i = reg_preds[i, :L].float()
             cls_i = cls_preds[i, :L]
-            ent_i = entropies[i, :L]
+            ent_i = entropies[i, :L].float()
 
-            res = {
-                "id": id[i],
-                "residue": list(seq),
-                "frustration_index": reg_i.cpu().numpy(),
-                "frustration_class": cls_i.cpu().numpy(),
-                "entropy": ent_i.cpu().numpy(),
-            }
+            aa_idx  = torch.tensor([self.aa_to_idx[aa] for aa in seq],
+                                    dtype=torch.long, device=self.device)
+            surp_i  = (reg_i - surp_mean[aa_idx]) / surp_std[aa_idx]
 
-            if self.surprisal_dict is not None:
-                mean = []
-                std = []
-                for aa in seq:
-                    mean.append(self.surprisal_dict[aa]["mean"])
-                    std.append(self.surprisal_dict[aa]["std"])
-                mean = torch.tensor(mean, device=self.device)
-                std = torch.tensor(std, device=self.device)
-                z = (reg_i - mean) / std
-                res["surprisal"] = z.cpu().numpy()
+            # single CPU transfer per sequence
+            reg_np  = reg_i.cpu().numpy()
+            cls_np  = cls_i.cpu().numpy()
+            ent_np  = ent_i.cpu().numpy()
+            surp_np = surp_i.cpu().numpy()
 
-            results.append(res)
+            for j, aa in enumerate(seq):
+                rows.append({
+                    "id":                seq_id,
+                    "residue":           aa,
+                    "frustration_index": float(reg_np[j]),
+                    "frustration_class": int(cls_np[j]),
+                    "entropy":           float(ent_np[j]),
+                    "surprisal":         float(surp_np[j]),
+                })
 
-        return results
+        return rows
 
     def configure_optimizers(self):
 

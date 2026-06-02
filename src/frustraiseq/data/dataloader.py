@@ -169,10 +169,11 @@ class FunstrationDataModule(LightningDataModule):
                           prefetch_factor=self.prefetch_factor)
 
     def predict_dataloader(self):
-        return DataLoader(self.predict_dataset, 
+        return DataLoader(self.predict_dataset,
                           batch_size=self.batch_size,
-                          shuffle=False, 
+                          shuffle=False,
                           num_workers=self.num_workers,
                           persistent_workers=self.persistent_workers,
                           pin_memory=self.pin_memory,
-                          prefetch_factor=self.prefetch_factor)
+                          prefetch_factor=self.prefetch_factor,
+                          collate_fn=self.predict_dataset.collate_fn)

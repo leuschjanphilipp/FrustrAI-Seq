@@ -267,12 +267,12 @@ def run_prediction(
         print("Error: No predictions were generated")
         sys.exit(1)
     
-    results = []
+    rows = []
     for pred_batch in predictions:
         if pred_batch is not None:
-            results.extend(pred_batch)
-    
-    df_output = pd.DataFrame(results)
+            rows.extend(pred_batch)
+
+    df_output = pd.DataFrame(rows)
     df_output.to_csv(output_csv, index=False)
     
     print(f"Results saved to {output_csv}")
