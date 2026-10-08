@@ -1,11 +1,14 @@
+import os
 import torch
 import pandas as pd
 import pyarrow.parquet as pq
 
 from torch.utils.data import DataLoader
-from pytorch_lightning import LightningDataModule
+from lightning.pytorch import LightningDataModule
 from .dataset import FunstrationDataset, InferenceDataset
 from datasets import load_dataset
+
+STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 
 class FunstrationDataModule(LightningDataModule):
     def __init__(self,
@@ -40,16 +43,12 @@ class FunstrationDataModule(LightningDataModule):
         if isinstance(self.fit_dataset, pd.DataFrame):
             print(f"Using provided DataFrame with {len(self.fit_dataset)} samples.")
         elif isinstance(self.fit_dataset, str):
-            try:
-                self.fit_dataset = load_dataset(self.fit_dataset)
-                print(f"Loaded dataset with {len(self.fit_dataset)} samples from Hugging Face Datasets library.")
-            except Exception as e:
-                print(f"Error loading dataset {self.fit_dataset} from Hugging Face Datasets library: {e}.\nTrying to load as Parquet file...")
-            try:
+            if os.path.exists(self.fit_dataset):
                 self.fit_dataset = pq.read_table(self.fit_dataset).to_pandas()
                 print(f"Loaded dataset from Parquet file with {len(self.fit_dataset)} samples.")
-            except Exception as e:
-                print(f"Error loading dataset from Parquet file {self.fit_dataset}: {e}")
+            else:
+                self.fit_dataset = load_dataset(self.fit_dataset, split="train").to_pandas()
+                print(f"Loaded dataset with {len(self.fit_dataset)} samples from Hugging Face Datasets library.")
         else:
             raise ValueError(f"Dataset must be a pandas DataFrame, a Hugging Face dataset name, or a path to a Parquet file. Got {type(self.fit_dataset)} instead.")
         
@@ -135,11 +134,27 @@ class FunstrationDataModule(LightningDataModule):
             assert self.inference_dataset["sequence"].notnull().all(), "All sequences must be non-null for prediction."
             assert self.inference_dataset["id"].notnull().all(), "All ids must be non-null for prediction."
 
+            sequences = self._map_nonstandard_residues(self.inference_dataset["id"].tolist(),
+                                                       self.inference_dataset["sequence"].tolist())
             self.predict_dataset = InferenceDataset(self.config,
                                                     self.inference_dataset["id"].tolist(),
-                                                    self.inference_dataset["sequence"].tolist())
+                                                    sequences)
             print("Created test dataset for prediction")
             print(f"Test dataset size: {len(self.predict_dataset)} samples")
+
+    @staticmethod
+    def _map_nonstandard_residues(ids, sequences):
+        """Uppercase sequences and map every non-standard residue to X, warning about each affected sequence."""
+        mapped_seqs = []
+        for seq_id, seq in zip(ids, sequences):
+            seq = seq.upper()
+            mapped = "".join(aa if aa in STANDARD_AAS else "X" for aa in seq)
+            nonstandard = sorted({aa for aa in seq if aa not in STANDARD_AAS and aa != "X"})
+            if nonstandard:
+                n = sum(aa in nonstandard for aa in seq)
+                print(f"WARNING: {seq_id}: mapped {n} non-standard residue(s) {nonstandard} to X.")
+            mapped_seqs.append(mapped)
+        return mapped_seqs
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, 

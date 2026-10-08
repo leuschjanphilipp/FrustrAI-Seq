@@ -5,11 +5,10 @@ FrustrAI-Seq is a deep learning tool for predicting per-residue local energetic 
 ### Installation
 
 ```bash
-mkdir FrustrAISeq
-cd FrustrAISeq
 conda create -n frustraiseq python=3.12 -y
-activate frustraiseq
+conda activate frustraiseq
 git clone https://github.com/leuschjanphilipp/FrustrAI-Seq.git
+cd FrustrAI-Seq
 ```
 Proceed by installing pytorch depending on your system. Look at their installation guides [here](https://pytorch.org/get-started/locally/).
 ```bash
@@ -29,32 +28,66 @@ SEVENCE
 EOF
 
 # Run prediction
-frustraiseq predict -i data/example_seqs.fasta -o data/output.csv --config src/frustraiseq/config/default_config.yml --checkpoint path/to/model.ckpt --plm-path /path/to/user-plm --batch-size 16 --accelerator gpu --verbose True
+frustraiseq predict -i data/example_seqs.fasta -o data/output.csv --config src/frustraiseq/config/default_config.yml --checkpoint path/to/model.ckpt --plm-path /path/to/user-plm --batch-size 16 --accelerator cuda
 
-# Or use the short version in which pLM and model checkpoint will be downloaded from Huggingface.
+# Or use the short version in which pLM and model checkpoint will be downloaded from HuggingFace.
 frustraiseq predict -i data/example_seqs.fasta -o data/output.csv
 ```
 
-Additionally config, pLM and checkpoint can also be specified in the config.
+Sequences are uppercased and non-standard residues (e.g. U, Z, O, B) are mapped to `X`; a warning is printed for every affected sequence.
 
-See `frustraiseq --help` for all options.
+The pLM and checkpoint paths can also be set in the config instead of on the command line. Use `--no-verbose` to hide the progress bar and model logs.
 
-Or find a tutorial notebook in /notebooks.
+See `frustraiseq predict --help` for all options, or find a tutorial notebook in `notebooks/`.
 
 
 ## Output Format
 
-The tool outputs a CSV file with predictions for each residue:
+The tool outputs a CSV file with one row per residue:
 
 ```csv
-id,residue,frustration_index,frustration_class,entropy,surprisal
-protein1,[S,E,Q,...],[0.13, -0.29, -0.14,...], [1,0,1,...], [0.79, 0.80, 0.83, ...], [1.11, 0.43, 1.09]
+id,residue,frustration_index,frustration_class,surprisal
+protein1,S,0.13,1,1.11
+protein1,E,-0.29,1,0.43
 ...
 ```
 
+- `frustration_index`: predicted local frustration index (regression head)
+- `frustration_class`: 0 = highly frustrated (index ≤ -1), 1 = neutral (-1 < index ≤ 0.55), 2 = minimally frustrated (index > 0.55). By default the class is obtained by binning `frustration_index`; set `use_cls_heads_output_for_class_pred: true` in the config to use the classification head instead.
+- `entropy` (only with `use_cls_heads_output_for_class_pred: true`): normalized entropy of the classification head's class probabilities (0 = confident, 1 = uniform). It is omitted by default because it describes the classification head, not the binned class.
+- `surprisal`: z-score of the predicted frustration index relative to the training-set distribution of that amino acid
+
+## Training a new model
+
+Training and evaluation scripts live in `src/frustraiseq/train/` and `src/frustraiseq/eval/`. Training uses multi-GPU DDP with bf16-mixed precision and logs to [Weights & Biases](https://wandb.ai) (run `wandb login` first).
+
+```bash
+python src/frustraiseq/train/train.py \
+    --experiment_name my_run \
+    --fit_dataset leuschj/Funstration \
+    --plm_model ./prot_t5_xl_half_uniref50-enc \
+    --split_key split_0 \
+    --batch_size 16 \
+    --num_workers 10 \
+    --devices 2
+```
+
+- `--fit_dataset` accepts a HuggingFace dataset id or a local Parquet file.
+- `--plm_model` is a local ProtT5 encoder directory (e.g. downloaded with `T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc").save_pretrained(...)`) or a HuggingFace model id.
+- `--split_key` selects the train/val/test split column (`split_0` ... `split_4`).
+- `--cath_sampling_n N` subsamples N proteins per CATH topology for quick debugging runs.
+
+All outputs are written to `./my_run/`: the best checkpoint (`best_val_model.ckpt`), the run config (`config.yaml`) and validation-set predictions (`val_preds.npz`). To evaluate on the test split:
+
+```bash
+python src/frustraiseq/eval/test.py --config my_run/config.yaml --checkpoint my_run/best_val_model.ckpt
+```
+
+The resulting checkpoint and config can be used directly with `frustraiseq predict --config my_run/config.yaml --checkpoint my_run/best_val_model.ckpt`.
+
 ### Contributing
 
-This is an APACHE2.0 LICENSE research repository. Contributions and suggestions are very welcome :)
+This is an Apache 2.0 licensed research repository. Contributions and suggestions are very welcome :)
 
 ## Citation
 
@@ -73,10 +106,4 @@ If you use FrustrAI-Seq in your research, please cite:
 
 ## Contact
 
-For questions and issues:
-- Open an issue on GitHub or contact the
-- corresponding and jointly last authors: gonzalo.parra@bsc.es and ga32bav@mytum.de
-
-
-
-
+For questions and issues, open an issue on GitHub or contact the corresponding and jointly last authors: gonzalo.parra@bsc.es and ga32bav@mytum.de

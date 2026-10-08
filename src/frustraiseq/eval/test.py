@@ -1,36 +1,26 @@
-import os
-import sys
 import yaml
 import argparse
 import numpy as np
-from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import CSVLogger
+from lightning.pytorch import Trainer
+from lightning.pytorch.loggers import CSVLogger
 
 from frustraiseq.data.dataloader import FunstrationDataModule
 from frustraiseq.model.frustraiseq import FrustrAISeq
 from frustraiseq.utils.utils import run_eval_metrics
 
 parser = argparse.ArgumentParser(description="Test FrustrAI-Seq model")
-#parser.add_argument("--experiment_name", type=str, default="train",)
-#parser.add_argument("--fit_dataset", type=str, default="leuschj/Funstration",)
-#parser.add_argument("--batch_size", type=int, default=32,)
-#parser.add_argument("--plm_model", type=str, default="./data/protT5",)
-#parser.add_argument("--split_key", type=str, default="split_0",)
-#parser.add_argument("--num_workers", type=int, default=10,)
-#parser.add_argument("--cath_sampling_n", type=int, default=None)
 parser.add_argument("--config", type=str, default="./config.yaml")
+parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Model checkpoint. Defaults to checkpoint_path in the config, else ./<experiment_name>/best_val_model.ckpt")
 args = parser.parse_args()
 
 with open(args.config, 'r') as f:
     config = yaml.safe_load(f)
 
-#config["experiment_name"] = args.experiment_name
-#config["fit_dataset"] = args.fit_dataset
-#config["batch_size"] = args.batch_size
-#config["pLM_model"] = args.plm_model
-#config["split_key"] = args.split_key
-#config["num_workers"] = args.num_workers
-#config["cath_sampling_n"] = args.cath_sampling_n
+if args.checkpoint is not None:
+    config["checkpoint_path"] = args.checkpoint
+elif config.get("checkpoint_path") is None:
+    config["checkpoint_path"] = f"./{config['experiment_name']}/best_val_model.ckpt"
 
 #torch.set_float32_matmul_precision("high")
 trainer_precision = "bf16-mixed" #"32"

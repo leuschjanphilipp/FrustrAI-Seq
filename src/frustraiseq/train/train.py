@@ -1,12 +1,11 @@
 import os
-import sys
-import torch
+import copy
 import argparse
 import numpy as np
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.strategies import DDPStrategy
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.strategies import DDPStrategy
 
 from frustraiseq.config.default_config import DEFAULT_CONFIG
 from frustraiseq.data.dataloader import FunstrationDataModule
@@ -22,9 +21,10 @@ parser.add_argument("--plm_model", type=str, default="./data/protT5",)
 parser.add_argument("--split_key", type=str, default="split_0",)
 parser.add_argument("--num_workers", type=int, default=10,)
 parser.add_argument("--cath_sampling_n", type=int, default=None)
+parser.add_argument("--devices", type=int, default=2)
 args = parser.parse_args()
 
-config = DEFAULT_CONFIG.copy()
+config = copy.deepcopy(DEFAULT_CONFIG)
 
 config["experiment_name"] = args.experiment_name
 config["fit_dataset"] = args.fit_dataset
@@ -71,7 +71,7 @@ lr_logger = LearningRateMonitor(logging_interval='step')
 
 trainer = Trainer(default_root_dir=f"./{config['experiment_name']}",
                 accelerator="gpu",
-                devices=2,
+                devices=args.devices,
                 strategy=DDPStrategy(find_unused_parameters=find_unused),
                 max_epochs=20,
                 logger=logger,

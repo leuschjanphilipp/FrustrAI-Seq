@@ -32,4 +32,5 @@ num_workers: 1
 pLM_model: data/protT5
 precision: half
 sample_size: null
+use_cls_heads_output_for_class_pred: false
 verbose: true

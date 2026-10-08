@@ -8,6 +8,7 @@ DEFAULT_CONFIG = {
     "pLM_model": None, #HF: Rostlab/prot_t5_xl_half_uniref50-enc
     "checkpoint_path": None, #HF: leuschj/FrustrAI-Seq/FrustraSeq_CW.ckpt
     "no_label_token": -100,
+    "use_cls_heads_output_for_class_pred": False,  # False: frustration_class = binned frustration_index
 
     "precision": "half",
     "verbose": True,

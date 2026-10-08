@@ -1,66 +1,77 @@
-import sys
-import yaml
-import json
-import tqdm
+"""
+Benchmark FrustrAI-Seq inference speed on a FASTA file (e.g. the human proteome).
+
+Example usage:
+    python src/frustraiseq/eval/benchmark_speed.py -i uniprotkb_human.fasta --checkpoint model.ckpt --plm-path /path/to/plm
+"""
+
+import copy
 import time
-import torch
-import numpy as np
+import argparse
 import pandas as pd
-import scanpy as sc
-import seaborn as sns
-import pyarrow.parquet as pq
-from pytorch_lightning import Trainer
+from lightning.pytorch import Trainer
 
-from matplotlib import pyplot as plt
-from transformers import T5Tokenizer, T5EncoderModel
-
-sys.path.append('..')
-sys.path.append('FrustraSeq')
-from src.model.FrustraSeq import FrustraSeq
-from src.data import FrustrationDataModule
-
-fasta_file_path = "../data/frustration/uniprotkb_human_AND_model_organism_9606_2025_12_31.fasta"
-
-seqs = {}
-with open(fasta_file_path, 'r') as f:
-    fasta_data = f.read()
-    for line in fasta_data.splitlines():
-        if line.startswith(">"):
-            header = line[1:].split('|')[1]
-            seqs[header] = ""
-        else:
-            seqs[header] += line.strip()
-
-seqs = dict(sorted(seqs.items(), key=lambda item: len(item[1])))
-df = pd.DataFrame.from_dict(seqs, orient='index', columns=["sequence"]).reset_index().rename(columns={'index':'id'})
-df["sequence"] = df["sequence"].apply(lambda x: x.replace("U", "X").replace("O", "X").replace("B", "X").replace("Z", "X").replace("X", "A"))
+from frustraiseq.cli import load_fasta_to_dataframe, load_config_from_yaml
+from frustraiseq.config.default_config import DEFAULT_CONFIG
+from frustraiseq.data.dataloader import FunstrationDataModule
+from frustraiseq.model.frustraiseq import FrustrAISeq
 
 
-# load config
-with open(f"../data/it5_ABL_protT5_CW_LORA/config.yaml", 'r') as f:
-    config = yaml.safe_load(f)
-config["pLM_model"] = "../data/protT5"
-config["max_seq_length"] = len(seqs[list(seqs.keys())[-1]])
+def main():
+    parser = argparse.ArgumentParser(description="Benchmark FrustrAI-Seq inference speed")
+    parser.add_argument("-i", "--input", type=str, required=True, help="Input FASTA file")
+    parser.add_argument("-o", "--output", type=str, default=None, help="Optional output CSV for the predictions")
+    parser.add_argument("--config", type=str, default=None, help="Config YAML (default: DEFAULT_CONFIG)")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Model checkpoint (default: checkpoint_path in config)")
+    parser.add_argument("--plm-path", type=str, default=None, help="pLM directory (default: pLM_model in config)")
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=10)
+    parser.add_argument("--accelerator", type=str, default="auto")
+    parser.add_argument("--precision", type=str, default="bf16-mixed")
+    args = parser.parse_args()
 
-model = FrustraSeq.load_from_checkpoint(checkpoint_path=f"../data/{config['experiment_name']}/best_val_model.ckpt",
-                                        config=config)
+    config = load_config_from_yaml(args.config) if args.config else copy.deepcopy(DEFAULT_CONFIG)
+    if args.checkpoint is not None:
+        config["checkpoint_path"] = args.checkpoint
+    if args.plm_path is not None:
+        config["pLM_model"] = args.plm_path
+    assert config.get("checkpoint_path") and config.get("pLM_model"), "Provide --checkpoint and --plm-path (or set them in the config)."
+    config["batch_size"] = args.batch_size
+    config["num_workers"] = args.num_workers
+    config["verbose"] = False
 
-with open('../data/frustration/reg_heuristic.json', 'r') as f:
-    model.surprisal_dict = json.load(f)
+    df = load_fasta_to_dataframe(args.input)
+    # sort by length so batches are similarly sized (non-standard residues are mapped to X by the DataModule)
+    df = df.iloc[df["sequence"].str.len().argsort()].reset_index(drop=True)
 
-trainer = Trainer(accelerator='gpu',
-                  devices=1, 
-                  precision="bf16-mixed")
+    data_module = FunstrationDataModule(config=config,
+                                        inference_dataset=df,
+                                        batch_size=config["batch_size"],
+                                        num_workers=config["num_workers"],
+                                        persistent_workers=config["num_workers"] > 0,
+                                        pin_memory=args.accelerator != "cpu")
 
-predict_dataloader = FrustrationDataModule(df=df,
-                                        max_seq_length=df["sequence"].str.len().max(),
-                                        batch_size=1,
-                                        num_workers=10,
-                                        persistent_workers=True,)
-start_time = time.time()
+    model = FrustrAISeq.load_from_checkpoint(checkpoint_path=config["checkpoint_path"], config=config)
+    model.eval()
 
-trainer.predict(model, predict_dataloader)
+    trainer = Trainer(accelerator=args.accelerator,
+                      devices=1,
+                      precision=args.precision,
+                      logger=False,
+                      enable_progress_bar=True)
 
-end_time = time.time()
-total_time = end_time - start_time
-print(f"Total time for evaluating {len(df)} sequences: {total_time:.2f} seconds")
+    start_time = time.time()
+    predictions = trainer.predict(model, datamodule=data_module)
+    total_time = time.time() - start_time
+
+    n_residues = df["sequence"].str.len().sum()
+    print(f"Total time for predicting {len(df)} sequences ({n_residues} residues): {total_time:.2f} seconds "
+          f"({len(df) / total_time:.2f} seqs/s, {n_residues / total_time:.0f} residues/s)")
+
+    if args.output is not None:
+        pd.DataFrame([row for batch in predictions if batch is not None for row in batch]).to_csv(args.output, index=False)
+        print(f"Predictions saved to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
