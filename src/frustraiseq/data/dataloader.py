@@ -5,10 +5,8 @@ import pyarrow.parquet as pq
 
 from torch.utils.data import DataLoader
 from lightning.pytorch import LightningDataModule
-from .dataset import FunstrationDataset, InferenceDataset
+from .dataset import FunstrationDataset, InferenceDataset, map_nonstandard_residues
 from datasets import load_dataset
-
-STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
 
 class FunstrationDataModule(LightningDataModule):
     def __init__(self,
@@ -134,27 +132,13 @@ class FunstrationDataModule(LightningDataModule):
             assert self.inference_dataset["sequence"].notnull().all(), "All sequences must be non-null for prediction."
             assert self.inference_dataset["id"].notnull().all(), "All ids must be non-null for prediction."
 
-            sequences = self._map_nonstandard_residues(self.inference_dataset["id"].tolist(),
-                                                       self.inference_dataset["sequence"].tolist())
+            sequences = map_nonstandard_residues(self.inference_dataset["id"].tolist(),
+                                                 self.inference_dataset["sequence"].tolist())
             self.predict_dataset = InferenceDataset(self.config,
                                                     self.inference_dataset["id"].tolist(),
                                                     sequences)
             print("Created test dataset for prediction")
             print(f"Test dataset size: {len(self.predict_dataset)} samples")
-
-    @staticmethod
-    def _map_nonstandard_residues(ids, sequences):
-        """Uppercase sequences and map every non-standard residue to X, warning about each affected sequence."""
-        mapped_seqs = []
-        for seq_id, seq in zip(ids, sequences):
-            seq = seq.upper()
-            mapped = "".join(aa if aa in STANDARD_AAS else "X" for aa in seq)
-            nonstandard = sorted({aa for aa in seq if aa not in STANDARD_AAS and aa != "X"})
-            if nonstandard:
-                n = sum(aa in nonstandard for aa in seq)
-                print(f"WARNING: {seq_id}: mapped {n} non-standard residue(s) {nonstandard} to X.")
-            mapped_seqs.append(mapped)
-        return mapped_seqs
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, 

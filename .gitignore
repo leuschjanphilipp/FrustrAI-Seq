@@ -18,6 +18,7 @@ CLAUDE.md
 .claude/
 notebooks/debug.ipynb
 src/frustraiseq/config/debug_config.yml
+docs/specs/
 
 # OS / Python cruft
 .DS_Store

@@ -18,6 +18,8 @@ core_requirements = [
     "pyarrow>=10.0.0",
     "scipy>=1.7.0",
     "huggingface_hub>=0.16.0",
+    "safetensors>=0.4.0",
+    "tqdm>=4.65.0",
 ]
 
 extras_require = {

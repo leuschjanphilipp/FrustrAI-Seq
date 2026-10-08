@@ -14,7 +14,7 @@ ce_weighting:
 - 2.65750085
 - 0.68876299
 - 0.8533673
-checkpoint_path: FrustrAI-Seq/FrustraSeq_CW.ckpt
+checkpoint_path: null
 experiment_name: FrustrAI-Seq_Prediction
 fit_dataset: leuschj/Funstration
 inference_dataset: null
@@ -29,7 +29,7 @@ max_seq_length: 512
 no_label_token: -100
 notes: ''
 num_workers: 1
-pLM_model: data/protT5
+pLM_model: null
 precision: half
 sample_size: null
 use_cls_heads_output_for_class_pred: false

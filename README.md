@@ -18,6 +18,8 @@ pip install -e . --no-deps
 
 ### Basic Usage
 
+The pretrained model (~2.4 GB) is downloaded from [HuggingFace](https://huggingface.co/leuschj/FrustrAI-Seq) on first use and cached.
+
 ```bash
 # Create input FASTA file
 cat > data/example_seqs.fasta << 'EOF'
@@ -28,18 +30,26 @@ SEVENCE
 EOF
 
 # Run prediction
-frustraiseq predict -i data/example_seqs.fasta -o data/output.csv --config src/frustraiseq/config/default_config.yml --checkpoint path/to/model.ckpt --plm-path /path/to/user-plm --batch-size 16 --accelerator cuda
-
-# Or use the short version in which pLM and model checkpoint will be downloaded from HuggingFace.
 frustraiseq predict -i data/example_seqs.fasta -o data/output.csv
+
+# Larger batch size and explicit accelerator
+frustraiseq predict -i data/example_seqs.fasta -o data/output.csv --batch-size 16 --accelerator cuda
 ```
 
-Sequences are uppercased and non-standard residues (e.g. U, Z, O, B) are mapped to `X`; a warning is printed for every affected sequence.
+Or in Python:
 
-The pLM and checkpoint paths can also be set in the config instead of on the command line. Use `--no-verbose` to hide the progress bar and model logs.
+```python
+from frustraiseq import FrustrAISeq
 
-See `frustraiseq predict --help` for all options, or find a tutorial notebook in `notebooks/`.
+model = FrustrAISeq.from_pretrained("leuschj/FrustrAI-Seq")
+df = model.predict({"protein1": "SEQVENCE", "protein2": "SEVENCE"}, batch_size=2)
+```
 
+`predict` accepts a dict `{id: sequence}`, a list of sequences or a DataFrame with `id` and `sequence` columns and returns the per-residue table described below. Config entries can be overridden in `from_pretrained`, e.g. `from_pretrained("leuschj/FrustrAI-Seq", use_cls_heads_output_for_class_pred=True)`.
+
+Sequences are uppercased and non-standard residues (e.g. U, Z, O, B) are mapped to `X`; a warning is printed for every affected sequence. Sequences in a batch are padded to the longest one and are not truncated, so use small batch sizes for long proteins.
+
+Use `--no-verbose` to hide the progress bar and model logs. See `frustraiseq predict --help` for all options, or find a tutorial notebook in `notebooks/`.
 
 ## Output Format
 
@@ -83,7 +93,19 @@ All outputs are written to `./my_run/`: the best checkpoint (`best_val_model.ckp
 python src/frustraiseq/eval/test.py --config my_run/config.yaml --checkpoint my_run/best_val_model.ckpt
 ```
 
-The resulting checkpoint and config can be used directly with `frustraiseq predict --config my_run/config.yaml --checkpoint my_run/best_val_model.ckpt`.
+The resulting checkpoint can be used for prediction directly (this needs the base pLM):
+
+```bash
+frustraiseq predict -i input.fasta -o output.csv --config my_run/config.yaml --checkpoint my_run/best_val_model.ckpt --plm-path ./prot_t5_xl_half_uniref50-enc
+```
+
+or exported to the single-file `from_pretrained` format (LoRA merged into the encoder, fp16), optionally pushing it to the HuggingFace Hub:
+
+```bash
+python src/frustraiseq/utils/export_pretrained.py --checkpoint my_run/best_val_model.ckpt --plm-path ./prot_t5_xl_half_uniref50-enc \
+    --config my_run/config.yaml --out ./my_model [--push-to-hub user/my-model]
+frustraiseq predict -i input.fasta -o output.csv --model ./my_model
+```
 
 ### Contributing
 

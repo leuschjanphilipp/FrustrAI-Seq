@@ -4,43 +4,64 @@ import yaml
 import time
 import torch
 import numpy as np
+import pandas as pd
 import torch.nn as nn
 import lightning.pytorch as pl
 
-from transformers import T5EncoderModel, T5Tokenizer
-from peft import LoraConfig, get_peft_model
+from tqdm.auto import tqdm
+from huggingface_hub import snapshot_download
+from safetensors.torch import load_file, save_file
+from transformers import T5Config, T5EncoderModel, T5Tokenizer
+from peft import LoraConfig, PeftModel, get_peft_model
 from torch.optim.lr_scheduler import LinearLR
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
+
+from frustraiseq.data.dataset import InferenceDataset, map_nonstandard_residues
 
 # Frustration index thresholds for binning regression outputs into classes,
 # equivalent to pd.cut(bins=[-inf, -1, 0.55, inf], labels=[0, 1, 2]):
 # <= -1: highly frustrated (0), (-1, 0.55]: neutral (1), > 0.55: minimally frustrated (2)
 FRUSTRATION_BIN_EDGES = [-1.0, 0.55]
 
+HF_MODEL_REPO = "leuschj/FrustrAI-Seq"
+CONFIG_NAME = "config.json"
+WEIGHTS_NAME = "model.safetensors"
+# local paths that are meaningless outside the machine a model was saved on
+_LOCAL_CONFIG_KEYS = ("pLM_model", "checkpoint_path", "inference_dataset")
+
 class FrustrAISeq(pl.LightningModule):
-    def __init__(self, config):
+    def __init__(self, config, encoder=None):
+        """
+        Args:
+            config: model config dict (see DEFAULT_CONFIG)
+            encoder: optional ready-to-use (merged) T5 encoder. If None, the pLM is loaded from
+                config["pLM_model"] and wrapped with LoRA adapters for training.
+        """
         super(FrustrAISeq, self).__init__()
 
         self.config = config
         self.experiment_name = config["experiment_name"]
         self.plm_model = config.get("pLM_model", "Rostlab/prot_t5_xl_uniref50")
         self.max_seq_length = config["max_seq_length"]
-        
-        self.encoder = T5EncoderModel.from_pretrained(self.plm_model).to(self.device)
-        if self.config["precision"] == "half":
-            self.encoder.half()
 
-        peft_config = LoraConfig(
-            task_type="FEATURE_EXTRACTION",
-            inference_mode=False,
-            r=self.config['lora_r'],
-            lora_alpha=self.config['lora_alpha'],
-            bias="all", #! TODO 
-            target_modules=self.config['lora_modules'],
-            #lora_dropout=0.1,
-        )
-        self.encoder.train()
-        self.encoder = get_peft_model(self.encoder, peft_config)
+        if encoder is not None:
+            self.encoder = encoder
+        else:
+            self.encoder = T5EncoderModel.from_pretrained(self.plm_model).to(self.device)
+            if self.config["precision"] == "half":
+                self.encoder.half()
+
+            peft_config = LoraConfig(
+                task_type="FEATURE_EXTRACTION",
+                inference_mode=False,
+                r=self.config['lora_r'],
+                lora_alpha=self.config['lora_alpha'],
+                bias="all", #! TODO
+                target_modules=self.config['lora_modules'],
+                #lora_dropout=0.1,
+            )
+            self.encoder.train()
+            self.encoder = get_peft_model(self.encoder, peft_config)
         # https://github.com/RSchmirler/ProtT5-EvoTuning/blob/main/notebook/PT5_EvoTuning.ipynb 
         # peft_config = LoraConfig(r=4, lora_alpha=1, bias="all", target_modules=["q","k","v","o"], task_type = "SEQ_2_SEQ_LM",)
         # https://github.com/mheinzinger/ProstT5/blob/main/scripts/predict_3Di_encoderOnly.py
@@ -81,7 +102,7 @@ class FrustrAISeq(pl.LightningModule):
         self.surprisal_std = torch.tensor([self.surprisal_dict[aa]["std"] for aa in self.surprisal_dict], device=self.device)
         self.aa_to_idx = {aa: i for i, aa in enumerate(self.surprisal_dict)}
 
-        if config["verbose"]:
+        if config["verbose"] and encoder is None:
             print(f"RANK {os.environ.get('RANK', -1)}: Loaded pLM model {self.plm_model}")
             print(f"RANK {os.environ.get('RANK', -1)}: Using LoRA fine-tuning for {self.config['lora_modules']} layers")
             self.encoder.print_trainable_parameters()
@@ -308,12 +329,107 @@ class FrustrAISeq(pl.LightningModule):
         #concat the batches
         self.test_dict = {key: np.concatenate(value) for key, value in self.test_dict.items() if len(value) > 0}
 
-    def on_predict_start(self):
-        print(f"\nDuring prediction sequence length limit will always be the longest sequence in the batch, so consider using batch size of 1 for inference to minimize memory usage.\n")
-
     @rank_zero_only
     def save_preds_dict(self, set="test"):
         print(f"TRAINER RANK {self.trainer.global_rank}. Saving preds.")
         print(f"OS RANK {os.environ.get('RANK', -1)}. Saving preds.")
         if self.trainer.global_rank == 0:
             np.savez_compressed(f"./{self.experiment_name}/{set}_preds.npz", **self.test_dict)
+
+    def save_pretrained(self, save_directory):
+        """
+        Save config, weights and tokenizer so the model can be loaded with `FrustrAISeq.from_pretrained`.
+        The encoder must be a plain (LoRA-merged) T5 encoder, see `frustraiseq/utils/export_pretrained.py`.
+        """
+        if isinstance(self.encoder, PeftModel):
+            raise ValueError("Merge the LoRA adapters first (self.encoder = self.encoder.merge_and_unload()).")
+        os.makedirs(save_directory, exist_ok=True)
+
+        config = {k: v for k, v in self.config.items() if k not in _LOCAL_CONFIG_KEYS}
+        config["plm_config"] = self.encoder.config.to_dict()
+        with open(os.path.join(save_directory, CONFIG_NAME), "w") as f:
+            json.dump(config, f, indent=2)
+
+        # store tied tensors (shared / embed_tokens) only once; the loss weights are not needed
+        state_dict, seen = {}, set()
+        for key, tensor in self.state_dict().items():
+            if key.startswith("ce_loss_fn") or tensor.data_ptr() in seen:
+                continue
+            seen.add(tensor.data_ptr())
+            state_dict[key] = tensor.contiguous()
+        save_file(state_dict, os.path.join(save_directory, WEIGHTS_NAME), metadata={"format": "pt"})
+
+        T5Tokenizer.from_pretrained(self.plm_model, do_lower_case=False).save_pretrained(save_directory)
+
+    @classmethod
+    def from_pretrained(cls, model_name_or_path=HF_MODEL_REPO, revision=None, **config_overrides):
+        """
+        Load a model saved with `save_pretrained` from a local directory or the HuggingFace Hub.
+
+        Args:
+            model_name_or_path: HF repo id (default: leuschj/FrustrAI-Seq) or local directory
+            revision: optional HF revision (branch, tag or commit)
+            **config_overrides: config entries to override, e.g. use_cls_heads_output_for_class_pred=True
+        """
+        if os.path.isdir(model_name_or_path):
+            model_dir = model_name_or_path
+        else:
+            model_dir = snapshot_download(model_name_or_path, revision=revision)
+
+        with open(os.path.join(model_dir, CONFIG_NAME), "r") as f:
+            config = json.load(f)
+        plm_config = T5Config.from_dict(config.pop("plm_config"))
+        config.update(config_overrides)
+        config["pLM_model"] = model_dir  # tokenizer files live next to the weights
+
+        # build the encoder without allocating memory; the weights are assigned from the safetensors file
+        with torch.device("meta"):
+            encoder = T5EncoderModel(plm_config)
+        model = cls(config, encoder=encoder)
+        result = model.load_state_dict(load_file(os.path.join(model_dir, WEIGHTS_NAME)), strict=False, assign=True)
+        if result.unexpected_keys:
+            raise ValueError(f"Unexpected keys in {WEIGHTS_NAME}: {result.unexpected_keys}")
+        model.encoder.tie_weights()  # embed_tokens shares the (stored once) shared embedding
+        still_meta = [name for name, p in model.named_parameters() if p.is_meta]
+        if still_meta:
+            raise ValueError(f"Missing weights in {WEIGHTS_NAME}: {still_meta}")
+        model.eval()
+        return model
+
+    @torch.no_grad()
+    def predict(self, sequences, batch_size=1, device=None):
+        """
+        Predict per-residue frustration for protein sequences.
+
+        Args:
+            sequences: dict {id: sequence}, list of sequences, or DataFrame with columns 'id' and 'sequence'
+            batch_size: number of sequences per forward pass (sequences are padded to the longest in the batch)
+            device: torch device; default cuda > mps > cpu
+
+        Returns:
+            DataFrame with one row per residue: id, residue, frustration_index, frustration_class,
+            [entropy,] surprisal
+        """
+        if isinstance(sequences, pd.DataFrame):
+            ids, seqs = sequences["id"].tolist(), sequences["sequence"].tolist()
+        elif isinstance(sequences, dict):
+            ids, seqs = list(sequences.keys()), list(sequences.values())
+        else:
+            seqs = list(sequences)
+            ids = [f"seq_{i}" for i in range(len(seqs))]
+        seqs = map_nonstandard_residues(ids, seqs)
+
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        self.to(device)
+        self.eval()
+
+        dataset = InferenceDataset(self.config, ids, seqs)
+        rows = []
+        starts = range(0, len(dataset), batch_size)
+        for batch_idx, start in enumerate(tqdm(starts, desc="Predicting", disable=not self.config.get("verbose", True))):
+            batch = dataset.collate_fn([dataset[i] for i in range(start, min(start + batch_size, len(dataset)))])
+            batch_rows = self.predict_step(batch, batch_idx)
+            if batch_rows is not None:
+                rows.extend(batch_rows)
+        return pd.DataFrame(rows)
