@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import yaml
 import time
 import torch
@@ -28,6 +29,8 @@ CONFIG_NAME = "config.json"
 WEIGHTS_NAME = "model.safetensors"
 # local paths that are meaningless outside the machine a model was saved on
 _LOCAL_CONFIG_KEYS = ("pLM_model", "checkpoint_path", "inference_dataset")
+# original (sentencepiece) tokenizer files of the pLM; copied as-is so they load with transformers 4 and 5
+TOKENIZER_FILES = ("spiece.model", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json")
 
 class FrustrAISeq(pl.LightningModule):
     def __init__(self, config, encoder=None):
@@ -359,7 +362,13 @@ class FrustrAISeq(pl.LightningModule):
             state_dict[key] = tensor.contiguous()
         save_file(state_dict, os.path.join(save_directory, WEIGHTS_NAME), metadata={"format": "pt"})
 
-        T5Tokenizer.from_pretrained(self.plm_model, do_lower_case=False).save_pretrained(save_directory)
+        if os.path.isdir(self.plm_model):
+            plm_dir = self.plm_model
+        else:
+            plm_dir = snapshot_download(self.plm_model, allow_patterns=list(TOKENIZER_FILES))
+        for name in TOKENIZER_FILES:
+            if os.path.exists(os.path.join(plm_dir, name)):
+                shutil.copy(os.path.join(plm_dir, name), save_directory)
 
     @classmethod
     def from_pretrained(cls, model_name_or_path=HF_MODEL_REPO, revision=None, **config_overrides):
