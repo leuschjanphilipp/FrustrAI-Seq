@@ -1,6 +1,23 @@
 from torch.utils.data import Dataset
 from transformers import T5Tokenizer
 
+STANDARD_AAS = "ACDEFGHIKLMNPQRSTVWY"
+
+
+def map_nonstandard_residues(ids, sequences):
+    """Uppercase sequences and map every non-standard residue to X, warning about each affected sequence."""
+    mapped_seqs = []
+    for seq_id, seq in zip(ids, sequences):
+        seq = seq.upper()
+        mapped = "".join(aa if aa in STANDARD_AAS else "X" for aa in seq)
+        nonstandard = sorted({aa for aa in seq if aa not in STANDARD_AAS and aa != "X"})
+        if nonstandard:
+            n = sum(aa in nonstandard for aa in seq)
+            print(f"WARNING: {seq_id}: mapped {n} non-standard residue(s) {nonstandard} to X.")
+        mapped_seqs.append(mapped)
+    return mapped_seqs
+
+
 
 class FunstrationDataset(Dataset):
     def __init__(self,

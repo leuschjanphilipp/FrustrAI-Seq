@@ -8,6 +8,19 @@ notebooks/*/
 *.parquet.gzip
 *.parquet
 *.egg-info
-FrustAI-Seq
+FrustrAI-Seq/
 prot_t5_xl_half_uniref50-enc
 .venv/
+
+# local-only
+scripts/
+CLAUDE.md
+.claude/
+notebooks/debug.ipynb
+src/frustraiseq/config/debug_config.yml
+docs/specs/
+
+# OS / Python cruft
+.DS_Store
+__pycache__/
+*.py[cod]

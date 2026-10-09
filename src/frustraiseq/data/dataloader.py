@@ -1,10 +1,11 @@
+import os
 import torch
 import pandas as pd
 import pyarrow.parquet as pq
 
 from torch.utils.data import DataLoader
-from pytorch_lightning import LightningDataModule
-from .dataset import FunstrationDataset, InferenceDataset
+from lightning.pytorch import LightningDataModule
+from .dataset import FunstrationDataset, InferenceDataset, map_nonstandard_residues
 from datasets import load_dataset
 
 class FunstrationDataModule(LightningDataModule):
@@ -40,16 +41,12 @@ class FunstrationDataModule(LightningDataModule):
         if isinstance(self.fit_dataset, pd.DataFrame):
             print(f"Using provided DataFrame with {len(self.fit_dataset)} samples.")
         elif isinstance(self.fit_dataset, str):
-            try:
-                self.fit_dataset = load_dataset(self.fit_dataset)
-                print(f"Loaded dataset with {len(self.fit_dataset)} samples from Hugging Face Datasets library.")
-            except Exception as e:
-                print(f"Error loading dataset {self.fit_dataset} from Hugging Face Datasets library: {e}.\nTrying to load as Parquet file...")
-            try:
+            if os.path.exists(self.fit_dataset):
                 self.fit_dataset = pq.read_table(self.fit_dataset).to_pandas()
                 print(f"Loaded dataset from Parquet file with {len(self.fit_dataset)} samples.")
-            except Exception as e:
-                print(f"Error loading dataset from Parquet file {self.fit_dataset}: {e}")
+            else:
+                self.fit_dataset = load_dataset(self.fit_dataset, split="train").to_pandas()
+                print(f"Loaded dataset with {len(self.fit_dataset)} samples from Hugging Face Datasets library.")
         else:
             raise ValueError(f"Dataset must be a pandas DataFrame, a Hugging Face dataset name, or a path to a Parquet file. Got {type(self.fit_dataset)} instead.")
         
@@ -135,9 +132,11 @@ class FunstrationDataModule(LightningDataModule):
             assert self.inference_dataset["sequence"].notnull().all(), "All sequences must be non-null for prediction."
             assert self.inference_dataset["id"].notnull().all(), "All ids must be non-null for prediction."
 
+            sequences = map_nonstandard_residues(self.inference_dataset["id"].tolist(),
+                                                 self.inference_dataset["sequence"].tolist())
             self.predict_dataset = InferenceDataset(self.config,
                                                     self.inference_dataset["id"].tolist(),
-                                                    self.inference_dataset["sequence"].tolist())
+                                                    sequences)
             print("Created test dataset for prediction")
             print(f"Test dataset size: {len(self.predict_dataset)} samples")
 

@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
 """
-FrustrAISeq Command Line Interface
+FrustrAI-Seq Command Line Interface
 
-This module provides a CLI for running FrustrAISeq predictions on protein sequences.
+This module provides a CLI for running FrustrAI-Seq predictions on protein sequences.
 
 Example usage:
     frustraiseq predict -i input.fasta -o output.csv
-    frustraiseq predict -i input.fasta -o output.csv --config config.yml --checkpoint model.ckpt --plm-path /path/to/plm --batch-size 32 --accelerator cuda --verbose True
+    frustraiseq predict -i input.fasta -o output.csv --model leuschj/FrustrAI-Seq --batch-size 32 --accelerator cuda
+    frustraiseq predict -i input.fasta -o output.csv --config config.yml --checkpoint model.ckpt --plm-path /path/to/plm
 """
 
 import argparse
-import os
+import copy
 import sys
-from transformers import T5Tokenizer
 import yaml
 import pandas as pd
-import torch
-from pathlib import Path
 from typing import Optional, Dict, Any
 from Bio import SeqIO
 
-import pytorch_lightning as pl
-from pytorch_lightning import Trainer
-from transformers import T5EncoderModel, T5Tokenizer
-
-from frustraiseq.data.dataloader import FunstrationDataModule
-from frustraiseq.model.frustraiseq import FrustrAISeq
+from frustraiseq.model.frustraiseq import FrustrAISeq, HF_MODEL_REPO
 from frustraiseq.config.default_config import DEFAULT_CONFIG
 
+# config entries that are passed on to from_pretrained models (everything else comes from the model's config.json)
+RUNTIME_CONFIG_KEYS = ("batch_size", "verbose", "use_cls_heads_output_for_class_pred")
 
 def load_fasta_to_dataframe(fasta_path: str) -> pd.DataFrame:
     """
@@ -90,64 +85,53 @@ def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-def load_model_from_checkpoint(
-    checkpoint_path: str,
-    config: Optional[Dict[str, Any]] = None,
+def load_model(
+    config: Dict[str, Any],
+    model_name_or_path: Optional[str] = None,
+    checkpoint_path: Optional[str] = None,
+    pLM_path: Optional[str] = None,
 ) -> FrustrAISeq:
     """
-    Load a FrustrAISeq model from a checkpoint.
-    
-    Args:
-        checkpoint_path: Path to the model checkpoint (.ckpt file)
-        config: Optional configuration dictionary
-        
-    Returns:
-        Loaded FrustrAISeq model
-    """
-    try:
-        model = FrustrAISeq.load_from_checkpoint(checkpoint_path=checkpoint_path, config=config)
-        model.eval()
-        return model
-        
-    except FileNotFoundError:
-        print(f"Error: Checkpoint file not found: {checkpoint_path}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error loading model checkpoint: {e}")
-        sys.exit(1)
+    Load a FrustrAI-Seq model, either a `from_pretrained` model (HF repo id or exported directory)
+    or a Lightning checkpoint from training (requires the base pLM).
 
+    Precedence: model_name_or_path > checkpoint_path > config["checkpoint_path"] > HF default model.
 
-def download_from_huggingface(repo_id: str = "leuschj/FrustrAI-Seq", 
-                              filename: str = "FrustraSeq_CW.ckpt", 
-                              local_dir: str = "./FrustrAI-Seq") -> str:
-    """
-    Download a file from HuggingFace Hub.
-    
     Args:
-        repo_id: HuggingFace repository ID (e.g., 'leuschj/FrustrAI-Seq')
-        filename: Name of the file to download
-        local_dir: Local directory to save the file
-        
+        config: configuration dictionary; for from_pretrained models only the runtime settings
+            (RUNTIME_CONFIG_KEYS) are taken from it
+        model_name_or_path: HF repo id or directory created with FrustrAISeq.save_pretrained
+        checkpoint_path: Lightning checkpoint (.ckpt)
+        pLM_path: base pLM directory (only for Lightning checkpoints, overrides config["pLM_model"])
+
     Returns:
-        Path to the downloaded file
+        Loaded FrustrAISeq model in eval mode
     """
+    if model_name_or_path is not None and checkpoint_path is not None:
+        print("Error: use either --model or --checkpoint, not both.")
+        sys.exit(1)
+    if model_name_or_path is None:
+        checkpoint_path = checkpoint_path or config.get("checkpoint_path")
+
     try:
-        from huggingface_hub import hf_hub_download
-        
-        local_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=local_dir,
-        )
-        print(f"Downloaded {filename} from {repo_id}")
-        return local_path
-        
-    except ImportError:
-        print("Error: huggingface_hub not installed. Install with: pip install huggingface_hub")
+        if checkpoint_path is not None:
+            if pLM_path is not None:
+                config["pLM_model"] = pLM_path
+            if config.get("pLM_model") is None:
+                print("Error: loading a Lightning checkpoint requires the base pLM (--plm-path or pLM_model in config).")
+                sys.exit(1)
+            print(f"Loading Lightning checkpoint {checkpoint_path} with pLM {config['pLM_model']}...")
+            model = FrustrAISeq.load_from_checkpoint(checkpoint_path=checkpoint_path, config=config, map_location="cpu")
+        else:
+            model_name_or_path = model_name_or_path or HF_MODEL_REPO
+            print(f"Loading pretrained model {model_name_or_path}...")
+            overrides = {k: config[k] for k in RUNTIME_CONFIG_KEYS if k in config}
+            model = FrustrAISeq.from_pretrained(model_name_or_path, **overrides)
+    except FileNotFoundError as e:
+        print(f"Error: file not found: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"Error downloading from HuggingFace: {e}")
-        sys.exit(1)
+    model.eval()
+    return model
 
 
 def run_prediction(
@@ -155,6 +139,7 @@ def run_prediction(
     output_csv: str,
 
     config_path: Optional[str] = None,
+    model_name_or_path: Optional[str] = None,
     checkpoint_path: Optional[str] = None,
     pLM_path: Optional[str] = None,
 
@@ -164,115 +149,42 @@ def run_prediction(
 ) -> None:
     """
     Run FrustrAI-Seq prediction on sequences from a FASTA file.
-    
+
     Args:
         input_fasta: Path to input FASTA file
         output_csv: Path to output CSV file
-        checkpoint_path: Path to model checkpoint (if None, downloads from HF)
-        config_path: Path to config YAML (if None, downloads from HF)
-        batch_size: Batch size for inference
-        accelerator: Accelerator to use ('cpu', 'cuda', 'mps')
-
-        use_huggingface: Whether to download from HuggingFace
-        hf_repo: HuggingFace repository ID
-        hf_checkpoint: Checkpoint filename on HuggingFace
-        hf_config: Config filename on HuggingFace
-
-        verbose: Whether to print verbose output
+        config_path: Path to config YAML (if None, uses DEFAULT_CONFIG)
+        model_name_or_path: HF repo id or exported model directory (default: leuschj/FrustrAI-Seq)
+        checkpoint_path: Lightning checkpoint from training (alternative to model_name_or_path)
+        pLM_path: base pLM directory, only needed with checkpoint_path
+        batch_size: Batch size for inference (if None, uses config)
+        accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps')
+        verbose: Whether to print verbose output (if None, uses config)
     """
-    
+
     print("=" * 80)
     print("FrustrAI-Seq. Per Residue Local Energetic Frustration Prediction")
     print("=" * 80)
-    
-    # Step 1: Load input sequences
-    print("\n[1/5] Loading input sequences...")
-    df_input = load_fasta_to_dataframe(input_fasta)
-    
-    # Step 2: Load or download checkpoint and config
-    print("\n[2/5] Loading model checkpoint and configuration...")
 
+    print("\n[1/3] Loading input sequences...")
+    df_input = load_fasta_to_dataframe(input_fasta)
+
+    print("\n[2/3] Loading model...")
     if config_path is not None:
-        print(f"Config path provided: {config_path}. Loading config...")
         config = load_config_from_yaml(config_path)
     else:
-        print("No config path provided. Falling back to default config...")
-        #config_path = download_from_huggingface(hf_repo, hf_config)
-        config = DEFAULT_CONFIG
-    
-    if pLM_path is not None:
-        print(f"pLM path provided: {pLM_path}. (arg plm-path overrides path in config)")
-        config["pLM_model"] = pLM_path
-    elif config.get("pLM_model") is not None:
-        print(f"pLM model specified in config: {config['pLM_model']}.")
-    else:
-        print("No pLM path provided. Downloading Rostlab/prot_t5_xl_half_uniref50-enc from HuggingFace...")
-        encoder = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc")
-        tokenizer = T5Tokenizer.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc")
-
-        encoder.save_pretrained("./prot_t5_xl_half_uniref50-enc")
-        tokenizer.save_pretrained("./prot_t5_xl_half_uniref50-enc")
-        del encoder
-        del tokenizer
-        config["pLM_model"] = "./prot_t5_xl_half_uniref50-enc"
-
-    if checkpoint_path is not None:
-        print(f"Checkpoint path provided: {checkpoint_path}. (arg checkpoint overrides path in config)")
-        config["checkpoint_path"] = checkpoint_path
-    elif config.get("checkpoint_path") is not None:
-        print(f"Checkpoint path specified in config: {config['checkpoint_path']}.")
-    else:
-        print("No checkpoint path provided. Downloading from HuggingFace...")
-        checkpoint_path = download_from_huggingface()
-        config["checkpoint_path"] = checkpoint_path
-
+        config = copy.deepcopy(DEFAULT_CONFIG)
     if batch_size is not None:
         config["batch_size"] = batch_size
     if verbose is not None:
         config["verbose"] = verbose
+    model = load_model(config, model_name_or_path, checkpoint_path, pLM_path)
 
-    config["inference_dataset"] = input_fasta #path of input fasta
+    print("\n[3/3] Running predictions...")
+    device = None if accelerator == "auto" else accelerator
+    df_output = model.predict(df_input, batch_size=config["batch_size"], device=device)
 
-    # Step 4: Setup data module
-    print("\n[3/5] Preparing data...")
-    data_module = FunstrationDataModule(
-        config=config,
-        inference_dataset=df_input,
-        batch_size=config["batch_size"],
-        num_workers=config["num_workers"],
-        persistent_workers=False,  # Disable for CLI to avoid hanging on exit
-        pin_memory=True if accelerator != "cpu" else False
-    )
-
-    # Step 5: Load model
-    print("\n[4/5] Loading model...")
-    model = load_model_from_checkpoint(config["checkpoint_path"], config)
-
-    # Step 6: Run predictions
-    print("\n[5/5] Running predictions...")
-
-    # TODO enable multi-GPU. 
-    trainer = Trainer(
-        accelerator=accelerator,
-        logger=False,
-        enable_progress_bar=verbose,
-    )
-    
-    predictions = trainer.predict(model, datamodule=data_module)
-    
-    # Process predictions and save to CSV
     print(f"\nPredictions complete. Saving to {output_csv}...")
-    
-    if predictions is None:
-        print("Error: No predictions were generated")
-        sys.exit(1)
-    
-    rows = []
-    for pred_batch in predictions:
-        if pred_batch is not None:
-            rows.extend(pred_batch)
-
-    df_output = pd.DataFrame(rows)
     df_output.to_csv(output_csv, index=False)
     
     print(f"Results saved to {output_csv}")
@@ -284,25 +196,17 @@ def run_prediction(
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="FrustrAISeq - Predict local energetic frustration for residues from sequences",
+        description="FrustrAI-Seq - Predict per-residue local energetic frustration from protein sequences",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-    Examples:
-    # Basic prediction
-    frustraiseq predict -i input.fasta -o output.csv
-    
-    # Load custom checkpoints and config with different batch size and accelerator
-    frustraiseq predict -i input.fasta -o output.csv --config config.yml --checkpoint model.ckpt --plm-path /path/to/plm \
-    --batch-size 32 --accelerator cuda --verbose True
+Examples:
+  # Basic prediction (model is downloaded from HuggingFace: leuschj/FrustrAI-Seq)
+  frustraiseq predict -i input.fasta -o output.csv --batch-size 16 --accelerator cuda
 
-    input_fasta: str,
-    output_csv: str,
-    config_path: Optional[str] = None,
-    checkpoint_path: Optional[str] = None,
-    pLM_path: Optional[str] = None,
-    batch_size: Optional[int] = 1,
-    accelerator: Optional[str] = "auto",
-    """
+  # Lightning checkpoint from your own training run (needs the base pLM)
+  frustraiseq predict -i input.fasta -o output.csv --config my_run/config.yaml \\
+      --checkpoint my_run/best_val_model.ckpt --plm-path /path/to/plm
+"""
     )
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -337,24 +241,31 @@ def main():
     )
 
     predict_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=f"HuggingFace repo id or local directory of a pretrained model (default: {HF_MODEL_REPO})"
+    )
+
+    predict_parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
-        help="Path to model checkpoint file (.ckpt). If not provided, download from HuggingFace: leuschj/FrustrAI-Seq HF repository"
+        help="Lightning checkpoint (.ckpt) from your own training run, used instead of --model. Requires --plm-path"
     )
 
     predict_parser.add_argument(
         "--plm-path",
         type=str,
         default=None,
-        help="Path to pretrained language model directory. If not provided, downloads Rostlab/prot_t5_xl_half_uniref50-enc from HuggingFace"
+        help="Base pLM directory, only needed with --checkpoint"
     )
     
     predict_parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
-        help="Batch size for inference (default: 1)"
+        default=None,
+        help="Batch size for inference (default: from config, 1)"
     )
     
     predict_parser.add_argument(
@@ -367,12 +278,11 @@ def main():
     
     predict_parser.add_argument(
         "--verbose",
-        action="store_true",
-        default=True,
-        help="Print verbose output (default: True)"
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Print verbose output and progress bar (default: from config, True)"
     )
-    
-    
+
     args = parser.parse_args()
     
     if args.command is None:
@@ -384,6 +294,7 @@ def main():
             input_fasta=args.input,
             output_csv=args.output,
             config_path=args.config,
+            model_name_or_path=args.model,
             checkpoint_path=args.checkpoint,
             pLM_path=args.plm_path,
             batch_size=args.batch_size,

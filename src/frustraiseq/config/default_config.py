@@ -5,9 +5,10 @@ DEFAULT_CONFIG = {
     "max_seq_length": 512,
     "batch_size": 1,
     "num_workers": 1,
-    "pLM_model": None, #HF: Rostlab/prot_t5_xl_half_uniref50-enc
-    "checkpoint_path": None, #HF: leuschj/FrustrAI-Seq/FrustraSeq_CW.ckpt
+    "pLM_model": None,  # base pLM, only needed for training or Lightning checkpoints
+    "checkpoint_path": None,  # Lightning checkpoint; None -> FrustrAISeq.from_pretrained("leuschj/FrustrAI-Seq")
     "no_label_token": -100,
+    "use_cls_heads_output_for_class_pred": False,  # False: frustration_class = binned frustration_index
 
     "precision": "half",
     "verbose": True,
